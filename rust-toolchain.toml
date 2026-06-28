@@ -1,0 +1,5 @@
+# Build and test on an explicit, latest stable toolchain (edition 2024 is the
+# latest edition). Keep this in sync with `rust-version` in Cargo.toml.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

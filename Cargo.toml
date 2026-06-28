@@ -1,0 +1,85 @@
+[package]
+name = "sshdt"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "A tiny, faithful, standard SSH server daemon (library + CLI) built on russh."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["ssh", "sshd", "server", "russh", "sftp"]
+categories = ["network-programming", "command-line-utilities"]
+
+[lib]
+name = "sshdt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sshdt"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli", "config"]
+# Serde (de)serializable Config + TOML loading. Keeps the lib lean when unused.
+config = ["dep:serde", "dep:toml"]
+# The CLI binary: argh, anyhow, and the tracing subscriber/appender. Implies `config`.
+cli = [
+    "config",
+    "dep:argh",
+    "dep:anyhow",
+    "dep:tracing-subscriber",
+    "dep:tracing-appender",
+]
+
+[dependencies]
+# --- SSH engine (ADR 0001) ---
+russh = "0.61"
+russh-sftp = "2.3"
+
+# --- async runtime (public contract; ADR 0010) ---
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "process",
+    "sync",
+    "macros",
+    "time",
+    "fs",
+    "signal",
+] }
+tokio-util = { version = "0.7", features = ["compat"] }
+futures-util = "0.3"
+
+# --- PTY (ADR 0006/0009): same crate rmux uses; ConPTY on Windows ---
+rmux-pty = "0.7"
+
+# --- observability: lib only emits events (ADR 0003) ---
+tracing = "0.1"
+
+# --- errors: thiserror in lib (ADR 0008) ---
+thiserror = "2"
+
+# --- dirs for ~/.sshdt resolution ---
+dirs = "6"
+
+# --- optional: serde Config + TOML (feature `config`) ---
+serde = { version = "1", features = ["derive"], optional = true }
+toml = { version = "0.8", optional = true }
+
+# --- optional: CLI binary deps (feature `cli`) ---
+argh = { version = "0.1", optional = true }
+anyhow = { version = "1", optional = true }
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "fmt",
+], optional = true }
+tracing-appender = { version = "0.2", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
+futures-util = "0.3"
+
+[profile.release]
+strip = true

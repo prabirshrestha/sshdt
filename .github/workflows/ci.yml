@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RMUX_VERSION: "0.7.1"
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      # Installs the exact toolchain + components pinned in rust-toolchain.toml,
+      # which doubles as the MSRV gate.
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install OpenSSH client + sshpass (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y openssh-client sshpass
+
+      # rmux (the multiplexer) exercises the persistence test end to end. It is a
+      # Unix-only test, so Windows is skipped. Download the prebuilt binary
+      # (much faster than building from source) and put its bin/ on PATH; the
+      # archive keeps bin/ + libexec/ + share/ as siblings, which rmux needs.
+      - name: Install rmux (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd "$RUNNER_TEMP"
+          arch=$(uname -m)   # x86_64 / aarch64 — matches the asset name
+          dir="rmux-${RMUX_VERSION}-linux-${arch}"
+          curl -fsSL "https://github.com/Helvesec/rmux/releases/download/v${RMUX_VERSION}/${dir}.tar.gz" | tar -xz
+          echo "$RUNNER_TEMP/${dir}/bin" >> "$GITHUB_PATH"
+
+      - name: Install rmux (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd "$RUNNER_TEMP"
+          arch=$(uname -m); [ "$arch" = arm64 ] && arch=aarch64
+          dir="rmux-${RMUX_VERSION}-macos-${arch}"
+          curl -fsSL "https://github.com/Helvesec/rmux/releases/download/v${RMUX_VERSION}/${dir}.tar.gz" | tar -xz
+          echo "$RUNNER_TEMP/${dir}/bin" >> "$GITHUB_PATH"
+
+      - name: Verify rmux (Unix)
+        if: runner.os != 'Windows'
+        run: rmux -V   # tmux-style CLI: -V prints the version
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Test
+        run: cargo test
+
+  minimal:
+    name: lib-only (no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        run: rustup show
+      - name: Build library without default features
+        run: cargo build --lib --no-default-features
