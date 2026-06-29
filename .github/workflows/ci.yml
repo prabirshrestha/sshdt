@@ -1,79 +1,263 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
   pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+    tags:
+      - 'v0.*.*'
+      - 'v0.*.*-alpha.*'
+      - 'v0.*.*-beta.*'
+
+permissions:
+  contents: read
 
 env:
+  CARGO_NET_RETRY: 10
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RMUX_VERSION: "0.7.1"
 
 jobs:
+  metadata:
+    name: metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.cargo.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read Cargo metadata
+        id: cargo
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
   test:
-    name: ${{ matrix.os }}
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v5
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
 
-      # Installs the exact toolchain + components pinned in rust-toolchain.toml,
-      # which doubles as the MSRV gate.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install Rust toolchain
         run: rustup show
 
-      - name: Install OpenSSH client + sshpass (Linux)
+      - name: Install OpenSSH client and sshpass
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y openssh-client sshpass
 
-      # rmux (the multiplexer) exercises the persistence test end to end. It is a
-      # Unix-only test, so Windows is skipped. Download the prebuilt binary
-      # (much faster than building from source) and put its bin/ on PATH; the
-      # archive keeps bin/ + libexec/ + share/ as siblings, which rmux needs.
-      - name: Install rmux (Linux)
+      - name: Install rmux on Linux
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           cd "$RUNNER_TEMP"
-          arch=$(uname -m)   # x86_64 / aarch64 — matches the asset name
+          arch=$(uname -m)
           dir="rmux-${RMUX_VERSION}-linux-${arch}"
           curl -fsSL "https://github.com/Helvesec/rmux/releases/download/v${RMUX_VERSION}/${dir}.tar.gz" | tar -xz
           echo "$RUNNER_TEMP/${dir}/bin" >> "$GITHUB_PATH"
 
-      - name: Install rmux (macOS)
+      - name: Install rmux on macOS
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           cd "$RUNNER_TEMP"
-          arch=$(uname -m); [ "$arch" = arm64 ] && arch=aarch64
+          arch=$(uname -m)
+          [ "$arch" = arm64 ] && arch=aarch64
           dir="rmux-${RMUX_VERSION}-macos-${arch}"
           curl -fsSL "https://github.com/Helvesec/rmux/releases/download/v${RMUX_VERSION}/${dir}.tar.gz" | tar -xz
           echo "$RUNNER_TEMP/${dir}/bin" >> "$GITHUB_PATH"
 
-      - name: Verify rmux (Unix)
+      - name: Verify rmux
         if: runner.os != 'Windows'
-        run: rmux -V   # tmux-style CLI: -V prints the version
+        run: rmux -V
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --all-targets
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Format check
-        run: cargo fmt --all -- --check
+        run: cargo build --locked --all-targets --all-features
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked --all-features
 
   minimal:
     name: lib-only (no default features)
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install Rust toolchain
         run: rustup show
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
       - name: Build library without default features
-        run: cargo build --lib --no-default-features
+        run: cargo build --locked --lib --no-default-features
+
+  build:
+    name: build (${{ matrix.target }})
+    needs:
+      - metadata
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: sshdt-v${{ needs.metadata.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: sshdt-v${{ needs.metadata.outputs.version }}-x86_64-unknown-linux-musl.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            artifact: sshdt-v${{ needs.metadata.outputs.version }}-x86_64-apple-darwin.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: sshdt-v${{ needs.metadata.outputs.version }}-aarch64-apple-darwin.tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: sshdt-v${{ needs.metadata.outputs.version }}-x86_64-pc-windows-msvc.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust target
+        shell: bash
+        run: rustup target add "${{ matrix.target }}"
+
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --verbose --locked --all-features --release --target "${{ matrix.target }}"
+
+      - name: Prepare Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar -C "target/${{ matrix.target }}/release" -czf "${{ matrix.artifact }}" sshdt
+
+      - name: Prepare Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "target/${{ matrix.target }}/release/sshdt.exe" -DestinationPath "${{ matrix.artifact }}"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  publish_crate:
+    name: publish crate
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - build
+      - metadata
+      - minimal
+      - quality
+      - test
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate tag version
+        shell: bash
+        run: test "${GITHUB_REF_NAME}" = "v${{ needs.metadata.outputs.version }}"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Authenticate to crates.io
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish to crates.io
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - metadata
+      - publish_crate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sshdt-v${{ needs.metadata.outputs.version }}-*
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: sha256sum sshdt-* > SHA256SUMS
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sshdt-v${{ needs.metadata.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+            sshdt-v${{ needs.metadata.outputs.version }}-x86_64-unknown-linux-musl.tar.gz
+            sshdt-v${{ needs.metadata.outputs.version }}-x86_64-apple-darwin.tar.gz
+            sshdt-v${{ needs.metadata.outputs.version }}-aarch64-apple-darwin.tar.gz
+            sshdt-v${{ needs.metadata.outputs.version }}-x86_64-pc-windows-msvc.zip
+            SHA256SUMS
