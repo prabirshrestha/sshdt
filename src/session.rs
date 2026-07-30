@@ -319,6 +319,10 @@ pub(crate) async fn run_session(
 }
 
 /// Send the final `exit-status`, `eof` and `close` on the channel.
+///
+/// This is the sole owner of outbound channel EOF. A russh channel writer's
+/// `AsyncWrite::shutdown` also sends channel-wide EOF, so stdout/stderr pumps
+/// must only flush and drop their writers.
 async fn finish_channel(id: ChannelId, write_half: &ChannelWriteHalf<Msg>, exit_code: u32) {
     if let Err(error) = write_half.exit_status(exit_code).await {
         tracing::debug!(?id, %error, "failed to send exit-status");
@@ -395,7 +399,7 @@ async fn run_pipe(
                     format!("sshdt: failed to run {}: {error}\n", command.program).as_bytes(),
                 )
                 .await;
-            let _ = w.shutdown().await;
+            let _ = w.flush().await;
             return 127;
         }
     };
@@ -407,14 +411,16 @@ async fn run_pipe(
     let mut stdout_writer = write_half.make_writer();
     let mut stderr_writer = write_half.make_writer_ext(Some(1));
 
-    // child stdout/stderr → client (spawned; writers are 'static).
+    // child stdout/stderr → client (spawned; writers are 'static). Do not call
+    // shutdown here: russh maps it to channel-wide EOF, which finish_channel
+    // sends exactly once after both streams have drained.
     let stdout_task = tokio::spawn(async move {
         let _ = tokio::io::copy(&mut child_stdout, &mut stdout_writer).await;
-        let _ = stdout_writer.shutdown().await;
+        let _ = stdout_writer.flush().await;
     });
     let stderr_task = tokio::spawn(async move {
         let _ = tokio::io::copy(&mut child_stderr, &mut stderr_writer).await;
-        let _ = stderr_writer.shutdown().await;
+        let _ = stderr_writer.flush().await;
     });
 
     // client → child stdin; on client EOF, close stdin so e.g. `cat` exits.

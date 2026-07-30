@@ -203,6 +203,44 @@ async fn exec_stderr_goes_to_extended_data() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn exec_sends_one_eof_after_exit_status() {
+    use russh::ChannelMsg;
+
+    let (_dir, b) = builder();
+    let mut handle = connect(b.build().unwrap()).await;
+    assert!(handle.authenticate_none("u").await.unwrap().success());
+
+    let mut channel = handle.channel_open_session().await.unwrap();
+    channel
+        .exec(true, "printf stdout; printf stderr >&2")
+        .await
+        .unwrap();
+
+    let mut saw_exit_status = false;
+    let mut eof_count = 0;
+    let mut close_count = 0;
+    while let Some(message) = channel.wait().await {
+        match message {
+            ChannelMsg::ExitStatus { exit_status } => {
+                assert_eq!(exit_status, 0);
+                saw_exit_status = true;
+            }
+            ChannelMsg::Eof => {
+                assert!(saw_exit_status, "EOF arrived before exit-status");
+                eof_count += 1;
+            }
+            ChannelMsg::Close => close_count += 1,
+            _ => {}
+        }
+    }
+
+    assert!(saw_exit_status);
+    assert_eq!(eof_count, 1);
+    assert_eq!(close_count, 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn exec_cat_is_full_duplex() {
     let (_dir, b) = builder();
     let mut handle = connect(b.build().unwrap()).await;
