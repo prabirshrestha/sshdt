@@ -3,6 +3,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::{builder, connect, gen_keypair, public_line};
 // The exec/command tests assume a POSIX shell, so they are Unix-only; `exec`
@@ -10,6 +11,46 @@ use common::{builder, connect, gen_keypair, public_line};
 #[cfg(unix)]
 use common::exec;
 use russh::keys::PrivateKeyWithHashAlg;
+
+#[derive(Default)]
+struct ChannelLifecycle {
+    stderr: Vec<u8>,
+    exit_status: Option<u32>,
+    eof_count: usize,
+    close_count: usize,
+}
+
+async fn collect_channel_lifecycle(
+    channel: &mut russh::Channel<russh::client::Msg>,
+) -> ChannelLifecycle {
+    use russh::ChannelMsg;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut lifecycle = ChannelLifecycle::default();
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::ExtendedData { data, ext: 1 } => {
+                    lifecycle.stderr.extend_from_slice(&data);
+                }
+                ChannelMsg::ExitStatus { exit_status } => {
+                    lifecycle.exit_status = Some(exit_status);
+                }
+                ChannelMsg::Eof => {
+                    assert!(
+                        lifecycle.exit_status.is_some(),
+                        "EOF arrived before exit-status"
+                    );
+                    lifecycle.eof_count += 1;
+                }
+                ChannelMsg::Close => lifecycle.close_count += 1,
+                _ => {}
+            }
+        }
+        lifecycle
+    })
+    .await
+    .expect("timed out waiting for channel close")
+}
 
 #[tokio::test]
 async fn anonymous_auth_accepts_by_default() {
@@ -204,8 +245,6 @@ async fn exec_stderr_goes_to_extended_data() {
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_sends_one_eof_after_exit_status() {
-    use russh::ChannelMsg;
-
     let (_dir, b) = builder();
     let mut handle = connect(b.build().unwrap()).await;
     assert!(handle.authenticate_none("u").await.unwrap().success());
@@ -216,27 +255,44 @@ async fn exec_sends_one_eof_after_exit_status() {
         .await
         .unwrap();
 
-    let mut saw_exit_status = false;
-    let mut eof_count = 0;
-    let mut close_count = 0;
-    while let Some(message) = channel.wait().await {
-        match message {
-            ChannelMsg::ExitStatus { exit_status } => {
-                assert_eq!(exit_status, 0);
-                saw_exit_status = true;
-            }
-            ChannelMsg::Eof => {
-                assert!(saw_exit_status, "EOF arrived before exit-status");
-                eof_count += 1;
-            }
-            ChannelMsg::Close => close_count += 1,
-            _ => {}
+    let lifecycle = collect_channel_lifecycle(&mut channel).await;
+
+    assert_eq!(lifecycle.exit_status, Some(0));
+    assert_eq!(lifecycle.eof_count, 1);
+    assert_eq!(lifecycle.close_count, 1);
+}
+
+#[tokio::test]
+async fn exec_spawn_failure_sends_one_eof_after_exit_status() {
+    use sshdt::{CommandResolver, SessionCommand, SessionRequest};
+
+    struct MissingCommand(String);
+
+    impl CommandResolver for MissingCommand {
+        fn resolve(&self, _request: &SessionRequest) -> SessionCommand {
+            SessionCommand::new(&self.0)
         }
     }
 
-    assert!(saw_exit_status);
-    assert_eq!(eof_count, 1);
-    assert_eq!(close_count, 1);
+    let (_dir, b) = builder();
+    let missing = _dir.path().join("missing-executable");
+    let resolver = Arc::new(MissingCommand(missing.to_string_lossy().into_owned()));
+    let mut handle = connect(b.command_resolver(resolver).build().unwrap()).await;
+    assert!(handle.authenticate_none("u").await.unwrap().success());
+
+    let mut channel = handle.channel_open_session().await.unwrap();
+    channel.exec(true, "ignored").await.unwrap();
+
+    let lifecycle = collect_channel_lifecycle(&mut channel).await;
+    let stderr = String::from_utf8_lossy(&lifecycle.stderr);
+
+    assert_eq!(lifecycle.exit_status, Some(127));
+    assert_eq!(lifecycle.eof_count, 1);
+    assert_eq!(lifecycle.close_count, 1);
+    assert!(
+        stderr.starts_with(&format!("sshdt: failed to run {}: ", missing.display())),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[cfg(unix)]
