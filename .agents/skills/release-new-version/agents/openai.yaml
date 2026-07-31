@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release sshdt Version"
+  short_description: "Release sshdt through tag-triggered CI"
+  default_prompt: "Use $release-new-version to bump, validate, push, and tag a new sshdt release."
