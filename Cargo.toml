@@ -29,6 +29,7 @@ cli = [
     "dep:anyhow",
     "dep:tracing-subscriber",
     "dep:tracing-appender",
+    "dep:windows-service",
 ]
 
 [dependencies]
@@ -75,6 +76,9 @@ tracing-subscriber = { version = "0.3", features = [
     "fmt",
 ], optional = true }
 tracing-appender = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = { version = "0.8", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

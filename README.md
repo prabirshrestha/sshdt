@@ -42,6 +42,34 @@ cargo install --path .     # or install the CLI
 
 Requires the toolchain pinned in `rust-toolchain.toml` (latest stable; edition 2024).
 
+### Windows service
+
+On Windows, sshdt can install and manage itself as a Windows service. Run these commands from an
+Administrator terminal. Put server options before `service`; the installer records them using
+absolute paths so the Service Control Manager can reuse the same configuration.
+
+```powershell
+sshdt --config C:\ProgramData\sshdt\sshdt.toml service install
+sshdt service start
+sshdt service status
+
+# Later:
+sshdt service restart
+sshdt service stop
+sshdt service uninstall
+```
+
+The installed service starts automatically with Windows, restarts after failures, and is not
+started during installation.
+For safety, installation is rejected unless password or public-key authentication is configured.
+It runs as `NT AUTHORITY\LocalService`, so config files, authorized-key files, host keys, SFTP
+roots, shells, and log destinations must be accessible to that account. Relative paths inside a
+config file are resolved from the config file's directory. Service sessions also run as
+`LocalService`, not as the user who installed sshdt. Pass `--log-file` before `service install` if
+you want persistent service logs; Windows services have no interactive stderr. A password passed
+with `--password` is stored in the service command line, so prefer an access-controlled config file
+or public-key authentication.
+
 ## Quick start
 
 ```sh
@@ -191,6 +219,10 @@ sshdt [OPTIONS]
       --max-startups <N>         Max concurrent unauthenticated conns   [default: 32]
       --version / --help
 ```
+
+Windows also provides `sshdt [OPTIONS] service
+<install|uninstall|start|stop|restart|status>`. Options used by the installed server must precede
+the `service` subcommand.
 
 Precedence is **flags > config file > defaults**. `RUST_LOG` overrides the `-d`/`-q` log level.
 

@@ -1,7 +1,7 @@
 //! The `sshdt` command-line interface (ADR 0007, 0008).
 //!
 //! Flags mirror `sshd` where they overlap (`-h` = host key, `-p`, `-E`, `-f`).
-//! The library never installs a `tracing` subscriber — that is done here.
+//! The library never installs a `tracing` subscriber - that is done here.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -12,7 +12,10 @@ use sshdt::{Config, Server};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
-/// sshdt — a tiny, faithful, standard SSH server you can `ssh` into.
+#[cfg(windows)]
+mod windows_service_support;
+
+/// sshdt - a tiny, faithful, standard SSH server you can `ssh` into.
 #[derive(FromArgs)]
 struct Args {
     /// port to listen on [default: 2222]
@@ -95,17 +98,109 @@ struct Args {
     /// print version and exit
     #[argh(switch)]
     version: bool,
+
+    /// run under the Windows Service Control Manager
+    #[cfg(windows)]
+    #[argh(switch, hidden_help)]
+    windows_service: bool,
+
+    /// manage the Windows service
+    #[cfg(windows)]
+    #[argh(subcommand)]
+    command: Option<CliCommand>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+#[cfg(windows)]
+#[derive(FromArgs)]
+#[argh(subcommand)]
+enum CliCommand {
+    Service(ServiceArgs),
+}
+
+/// manage the Windows service.
+#[cfg(windows)]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "service")]
+struct ServiceArgs {
+    #[argh(subcommand)]
+    action: ServiceAction,
+}
+
+#[cfg(windows)]
+#[derive(FromArgs)]
+#[argh(subcommand)]
+enum ServiceAction {
+    Install(ServiceInstall),
+    Uninstall(ServiceUninstall),
+    Start(ServiceStart),
+    Stop(ServiceStop),
+    Restart(ServiceRestart),
+    Status(ServiceStatus),
+}
+
+/// install the service with automatic startup.
+#[cfg(windows)]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "install")]
+struct ServiceInstall {}
+
+/// stop and remove the service.
+#[cfg(windows)]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "uninstall")]
+struct ServiceUninstall {}
+
+/// start the service.
+#[cfg(windows)]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "start")]
+struct ServiceStart {}
+
+/// stop the service.
+#[cfg(windows)]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "stop")]
+struct ServiceStop {}
+
+/// restart the service.
+#[cfg(windows)]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "restart")]
+struct ServiceRestart {}
+
+/// show the service state and startup mode.
+#[cfg(windows)]
+#[derive(FromArgs)]
+#[argh(subcommand, name = "status")]
+struct ServiceStatus {}
+
+fn main() -> anyhow::Result<()> {
     let args: Args = argh::from_env();
+
+    #[cfg(windows)]
+    if let Some(CliCommand::Service(service)) = &args.command {
+        return windows_service_support::manage(&args, &service.action);
+    }
 
     if args.version {
         println!("sshdt {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
+    #[cfg(windows)]
+    if args.windows_service {
+        return windows_service_support::dispatch(args)
+            .context("failed to run as a Windows service");
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to create the async runtime")?
+        .block_on(run_console(args))
+}
+
+async fn run_console(args: Args) -> anyhow::Result<()> {
     let _log_guard = init_logging(&args)?;
 
     let config = build_config(&args).context("invalid configuration")?;
@@ -117,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind {bind}"))?;
 
-    tracing::info!(addr = %handle.local_addr(), "sshdt is ready — press Ctrl-C to stop");
+    tracing::info!(addr = %handle.local_addr(), "sshdt is ready - press Ctrl-C to stop");
 
     tokio::signal::ctrl_c()
         .await
@@ -214,5 +309,46 @@ fn init_logging(args: &Args) -> anyhow::Result<Option<WorkerGuard>> {
             .with_writer(std::io::stderr)
             .init();
         Ok(None)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use argh::FromArgs;
+
+    use super::{Args, CliCommand, ServiceAction};
+
+    #[test]
+    fn service_install_preserves_preceding_server_options() {
+        let args = Args::from_args(
+            &["sshdt"],
+            &[
+                "--config",
+                r"C:\ProgramData\sshdt\sshdt.toml",
+                "--bind",
+                "0.0.0.0",
+                "service",
+                "install",
+            ],
+        )
+        .expect("service command should parse");
+
+        assert_eq!(args.bind.unwrap().to_string(), "0.0.0.0");
+        assert!(matches!(
+            args.command,
+            Some(CliCommand::Service(service))
+                if matches!(service.action, ServiceAction::Install(_))
+        ));
+    }
+
+    #[test]
+    fn service_status_parses_without_server_options() {
+        let args = Args::from_args(&["sshdt"], &["service", "status"])
+            .expect("service command should parse");
+        assert!(matches!(
+            args.command,
+            Some(CliCommand::Service(service))
+                if matches!(service.action, ServiceAction::Status(_))
+        ));
     }
 }
