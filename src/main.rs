@@ -30,6 +30,10 @@ struct Args {
     #[argh(option, short = 'f')]
     config: Option<PathBuf>,
 
+    /// do not load the default ~/.ssh/sshdt_config file
+    #[argh(switch)]
+    no_config: bool,
+
     /// append logs to FILE instead of stderr
     #[argh(option, short = 'E')]
     log_file: Option<PathBuf>,
@@ -270,6 +274,7 @@ fn startup_args(args: &Args) -> anyhow::Result<Vec<String>> {
     if let Some(path) = &args.config {
         push_path_option(&mut result, "--config", path)?;
     }
+    push_switch(&mut result, "--no-config", args.no_config);
     if let Some(path) = &args.log_file {
         push_path_option(&mut result, "--log-file", path)?;
     }
@@ -336,8 +341,12 @@ fn push_path_option(
 
 /// Build the effective [`Config`]: defaults < config file < flags (ADR 0019).
 fn build_config(args: &Args) -> anyhow::Result<Config> {
+    anyhow::ensure!(
+        args.config.is_none() || !args.no_config,
+        "--config and --no-config cannot be used together"
+    );
     let home = dirs::home_dir();
-    let config_path = select_config_path(args.config.as_deref(), home.as_deref());
+    let config_path = select_config_path(args.config.as_deref(), args.no_config, home.as_deref());
     let mut config = match config_path {
         Some(path) => Config::load_file(&path)
             .with_context(|| format!("failed to load config file {}", path.display()))?,
@@ -389,8 +398,15 @@ fn build_config(args: &Args) -> anyhow::Result<Config> {
     Ok(config)
 }
 
-fn select_config_path(explicit: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+fn select_config_path(
+    explicit: Option<&Path>,
+    no_config: bool,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
     explicit.map(Path::to_path_buf).or_else(|| {
+        if no_config {
+            return None;
+        }
         let path = home?.join(".ssh").join("sshdt_config");
         path.exists().then_some(path)
     })
@@ -514,14 +530,17 @@ mod tests {
     #[test]
     fn selects_implicit_config_only_when_it_exists() {
         let directory = tempfile::tempdir().unwrap();
-        assert_eq!(select_config_path(None, Some(directory.path())), None);
+        assert_eq!(
+            select_config_path(None, false, Some(directory.path())),
+            None
+        );
 
         let ssh_directory = directory.path().join(".ssh");
         std::fs::create_dir(&ssh_directory).unwrap();
         let implicit = ssh_directory.join("sshdt_config");
         std::fs::write(&implicit, "Port 2200\n").unwrap();
         assert_eq!(
-            select_config_path(None, Some(directory.path())),
+            select_config_path(None, false, Some(directory.path())),
             Some(implicit)
         );
     }
@@ -531,9 +550,32 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let explicit = directory.path().join("custom_config");
         assert_eq!(
-            select_config_path(Some(&explicit), Some(directory.path())),
+            select_config_path(Some(&explicit), false, Some(directory.path())),
             Some(explicit)
         );
+    }
+
+    #[test]
+    fn no_config_disables_the_implicit_config_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let ssh_directory = directory.path().join(".ssh");
+        std::fs::create_dir(&ssh_directory).unwrap();
+        std::fs::write(ssh_directory.join("sshdt_config"), "Port 2200\n").unwrap();
+
+        assert_eq!(select_config_path(None, true, Some(directory.path())), None);
+    }
+
+    #[test]
+    fn service_install_preserves_no_config() {
+        let args = parse(&["--no-config", "service", "install"]);
+        assert_eq!(startup_args(&args).unwrap(), ["--no-config"]);
+    }
+
+    #[test]
+    fn config_and_no_config_are_rejected_together() {
+        let args = parse(&["--config", "custom", "--no-config"]);
+        let error = super::build_config(&args).unwrap_err();
+        assert!(error.to_string().contains("cannot be used together"));
     }
 
     #[test]

@@ -90,7 +90,12 @@ If `--config` is not set, sshdt automatically loads
 `%USERPROFILE%\.ssh\sshdt_config` when that file exists. If it does not exist,
 sshdt uses its normal built-in defaults. These include `127.0.0.1:2222`, the
 persistent host key at `%USERPROFILE%\.sshdt\host_ed25519`, anonymous
-authentication, and the default Windows shell.
+authentication, and the default Windows shell. Use `--no-config` to skip the
+automatic config file:
+
+```powershell
+sshdt --no-config service install
+```
 
 This uses the current user's Windows `Run` registry entry, like AI Proxy's
 **Launch at login** setting. It needs no administrator rights and runs sshdt as
@@ -229,6 +234,7 @@ sshdt [OPTIONS] [<command>]
   -h, --host-key <FILE>          Host key file (generated if missing)  [default: ~/.sshdt/host_ed25519]
                                  (repeatable)
   -f, --config <FILE>            Load config [default: ~/.ssh/sshdt_config when present]
+      --no-config                Do not load the default ~/.ssh/sshdt_config file
   -E, --log-file <FILE>          Append logs to FILE instead of stderr
   -d, --debug                    Debug logging (-v alias)
   -q, --quiet                    Errors only
@@ -258,6 +264,8 @@ Commands:
 ```
 
 Precedence is **flags > explicit `--config` or `~/.ssh/sshdt_config` > defaults**.
+Use `--no-config` for flags plus built-in defaults only. It cannot be combined
+with `--config`.
 `RUST_LOG` overrides the `-d`/`-q` log level.
 
 ## Config file (`-f`)
