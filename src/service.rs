@@ -194,7 +194,7 @@ mod windows {
             command.push(' ');
             command.push_str(&quote_windows_argument(argument));
         }
-        command.push_str(" service run");
+        command.push_str(" --service-run");
 
         let settings = CURRENT_USER
             .create(SETTINGS_KEY)
@@ -263,7 +263,7 @@ mod windows {
         let mut command = Command::new(saved_executable()?);
         command
             .args(saved_args()?)
-            .args(["service", "run"])
+            .arg("--service-run")
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

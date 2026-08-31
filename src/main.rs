@@ -98,6 +98,10 @@ struct Args {
     #[argh(switch)]
     version: bool,
 
+    /// run under Windows launch-at-login process control
+    #[argh(switch, hidden_help)]
+    service_run: bool,
+
     /// manage launch at login for the current Windows user
     #[argh(subcommand)]
     command: Option<Command>,
@@ -127,7 +131,6 @@ enum ServiceCommand {
     Stop(StopService),
     Restart(RestartService),
     Logs(ServiceLogs),
-    Run(RunService),
 }
 
 /// Install sshdt as a launch-at-login program.
@@ -169,11 +172,6 @@ struct ServiceLogs {
     follow: bool,
 }
 
-/// Run sshdt under launch-at-login process control.
-#[derive(FromArgs)]
-#[argh(subcommand, name = "run")]
-struct RunService {}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Args = argh::from_env();
@@ -183,12 +181,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if matches!(
-        &args.command,
-        Some(Command::Service(ServiceArgs {
-            command: ServiceCommand::Run(_)
-        }))
-    ) {
+    if args.service_run {
         #[cfg(not(windows))]
         anyhow::bail!("service mode is currently supported only on Windows");
 
@@ -261,7 +254,6 @@ fn manage_service(service_args: &ServiceArgs, args: &Args) -> anyhow::Result<()>
             },
             Vec::new(),
         ),
-        ServiceCommand::Run(_) => unreachable!("service run is handled before management actions"),
     }
 }
 
@@ -532,7 +524,6 @@ mod tests {
             ("stop", "stop"),
             ("restart", "restart"),
             ("logs", "logs"),
-            ("run", "run"),
         ] {
             let args = parse(&["service", name]);
             let Some(Command::Service(service)) = args.command else {
@@ -546,7 +537,6 @@ mod tests {
                 ServiceCommand::Stop(_) => "stop",
                 ServiceCommand::Restart(_) => "restart",
                 ServiceCommand::Logs(_) => "logs",
-                ServiceCommand::Run(_) => "run",
             };
             assert_eq!(actual, expected);
         }
