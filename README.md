@@ -42,6 +42,31 @@ cargo install --path .     # or install the CLI
 
 Requires the toolchain pinned in `rust-toolchain.toml` (latest stable; edition 2024).
 
+### Windows launch at login
+
+On Windows, sshdt can register itself to start when the current user signs in:
+
+```powershell
+sshdt --config C:\Users\me\.sshdt\sshd_config service install
+sshdt service status
+sshdt service uninstall
+```
+
+`service install` saves the server options that appear before `service`. Relative
+file and directory paths are converted to absolute paths. Run the command again
+to replace the saved options.
+
+If `--config` is not set, sshdt uses its normal built-in defaults when it starts
+at login. These include `127.0.0.1:2222`, the persistent host key at
+`%USERPROFILE%\.sshdt\host_ed25519`, anonymous authentication, and the default
+Windows shell.
+
+This uses the current user's Windows `Run` registry entry, like AI Proxy's
+**Launch at login** setting. It needs no administrator rights and runs sshdt as
+the signed-in user. It is not a Windows Service Control Manager service, and it
+does not start before user sign-in. Service installation is not supported on
+macOS or Linux yet.
+
 ## Quick start
 
 ```sh
@@ -167,7 +192,7 @@ are what actually gate access). With no restriction (the default), any username 
 ## CLI
 
 ```
-sshdt [OPTIONS]
+sshdt [OPTIONS] [<command>]
 
   -p, --port <PORT>              Port to listen on                     [default: 2222]
   -h, --host-key <FILE>          Host key file (generated if missing)  [default: ~/.sshdt/host_ed25519]
@@ -190,6 +215,11 @@ sshdt [OPTIONS]
       --login-grace <SECS>       Auth timeout                           [default: 60]
       --max-startups <N>         Max concurrent unauthenticated conns   [default: 32]
       --version / --help
+
+Commands:
+  service install                Launch sshdt at login for the current Windows user
+  service uninstall              Remove sshdt from launch at login
+  service status                 Show whether launch at login is enabled
 ```
 
 Precedence is **flags > config file > defaults**. `RUST_LOG` overrides the `-d`/`-q` log level.

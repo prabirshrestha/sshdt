@@ -12,6 +12,8 @@ use sshdt::{Config, Server};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
+mod service;
+
 /// sshdt — a tiny, faithful, standard SSH server you can `ssh` into.
 #[derive(FromArgs)]
 struct Args {
@@ -95,7 +97,48 @@ struct Args {
     /// print version and exit
     #[argh(switch)]
     version: bool,
+
+    /// manage launch at login for the current Windows user
+    #[argh(subcommand)]
+    command: Option<Command>,
 }
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+enum Command {
+    Service(ServiceArgs),
+}
+
+/// Manage launch at login for the current Windows user.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "service")]
+struct ServiceArgs {
+    #[argh(subcommand)]
+    command: ServiceCommand,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+enum ServiceCommand {
+    Install(InstallService),
+    Uninstall(UninstallService),
+    Status(ServiceStatus),
+}
+
+/// Install sshdt as a launch-at-login program.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "install")]
+struct InstallService {}
+
+/// Remove sshdt from launch at login.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "uninstall")]
+struct UninstallService {}
+
+/// Show whether sshdt is configured to launch at login.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "status")]
+struct ServiceStatus {}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -104,6 +147,10 @@ async fn main() -> anyhow::Result<()> {
     if args.version {
         println!("sshdt {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+
+    if let Some(Command::Service(service_args)) = &args.command {
+        return manage_service(service_args, &args);
     }
 
     let _log_guard = init_logging(&args)?;
@@ -124,6 +171,93 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to listen for Ctrl-C")?;
     tracing::info!("shutting down");
     handle.shutdown().await;
+    Ok(())
+}
+
+fn manage_service(service_args: &ServiceArgs, args: &Args) -> anyhow::Result<()> {
+    match service_args.command {
+        ServiceCommand::Install(_) => {
+            service::manage(service::Action::Install, startup_args(args)?)
+        }
+        ServiceCommand::Uninstall(_) => service::manage(service::Action::Uninstall, Vec::new()),
+        ServiceCommand::Status(_) => service::manage(service::Action::Status, Vec::new()),
+    }
+}
+
+/// Rebuild the explicit server options for the launch-at-login command.
+/// Paths are made absolute because Windows does not define a stable working
+/// directory for programs started from the Run registry key.
+fn startup_args(args: &Args) -> anyhow::Result<Vec<String>> {
+    let mut result = Vec::new();
+
+    push_option(&mut result, "--port", args.port);
+    for path in &args.host_key {
+        push_path_option(&mut result, "--host-key", path)?;
+    }
+    if let Some(path) = &args.config {
+        push_path_option(&mut result, "--config", path)?;
+    }
+    if let Some(path) = &args.log_file {
+        push_path_option(&mut result, "--log-file", path)?;
+    }
+    push_switch(&mut result, "--debug", args.debug);
+    push_switch(&mut result, "--verbose", args.verbose);
+    push_switch(&mut result, "--quiet", args.quiet);
+    push_option(&mut result, "--bind", args.bind);
+    push_option(
+        &mut result,
+        "--host-key-passphrase",
+        args.host_key_passphrase.as_deref(),
+    );
+    push_option(&mut result, "--password", args.password.as_deref());
+    for path in &args.authorized_keys {
+        push_path_option(&mut result, "--authorized-keys", path)?;
+    }
+    for key in &args.pubkey {
+        push_option(&mut result, "--pubkey", Some(key.as_str()));
+    }
+    push_option(&mut result, "--shell", args.shell.as_deref());
+    if let Some(path) = &args.sftp_root {
+        push_path_option(&mut result, "--sftp-root", path)?;
+    }
+    push_switch(&mut result, "--strict-user", args.strict_user);
+    for user in &args.allow_user {
+        push_option(&mut result, "--allow-user", Some(user.as_str()));
+    }
+    push_switch(&mut result, "--no-forward", args.no_forward);
+    push_option(&mut result, "--login-grace", args.login_grace);
+    push_option(&mut result, "--max-startups", args.max_startups);
+
+    Ok(result)
+}
+
+fn push_option<T: ToString>(result: &mut Vec<String>, name: &str, value: Option<T>) {
+    if let Some(value) = value {
+        result.push(name.to_owned());
+        result.push(value.to_string());
+    }
+}
+
+fn push_switch(result: &mut Vec<String>, name: &str, enabled: bool) {
+    if enabled {
+        result.push(name.to_owned());
+    }
+}
+
+fn push_path_option(
+    result: &mut Vec<String>,
+    name: &str,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to resolve the current directory")?
+            .join(path)
+    };
+    result.push(name.to_owned());
+    result.push(absolute.to_string_lossy().into_owned());
     Ok(())
 }
 
@@ -214,5 +348,78 @@ fn init_logging(args: &Args) -> anyhow::Result<Option<WorkerGuard>> {
             .with_writer(std::io::stderr)
             .init();
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, Command, ServiceCommand, startup_args};
+    use argh::FromArgs;
+
+    fn parse(command: &[&str]) -> Args {
+        Args::from_args(&["sshdt"], command).expect("arguments should parse")
+    }
+
+    #[test]
+    fn server_mode_does_not_require_a_subcommand() {
+        let args = parse(&["--port", "2200"]);
+        assert!(args.command.is_none());
+        assert_eq!(args.port, Some(2200));
+    }
+
+    #[test]
+    fn service_install_preserves_server_options() {
+        let args = parse(&[
+            "--port",
+            "2200",
+            "--bind",
+            "0.0.0.0",
+            "--shell",
+            "pwsh -NoLogo",
+            "--allow-user",
+            "Ada Lovelace",
+            "--no-forward",
+            "service",
+            "install",
+        ]);
+        assert!(matches!(
+            args.command,
+            Some(Command::Service(ref service))
+                if matches!(service.command, ServiceCommand::Install(_))
+        ));
+        assert_eq!(
+            startup_args(&args).unwrap(),
+            [
+                "--port",
+                "2200",
+                "--bind",
+                "0.0.0.0",
+                "--shell",
+                "pwsh -NoLogo",
+                "--allow-user",
+                "Ada Lovelace",
+                "--no-forward",
+            ]
+        );
+    }
+
+    #[test]
+    fn service_commands_parse() {
+        for (name, expected) in [
+            ("install", "install"),
+            ("uninstall", "uninstall"),
+            ("status", "status"),
+        ] {
+            let args = parse(&["service", name]);
+            let Some(Command::Service(service)) = args.command else {
+                panic!("expected service command");
+            };
+            let actual = match service.command {
+                ServiceCommand::Install(_) => "install",
+                ServiceCommand::Uninstall(_) => "uninstall",
+                ServiceCommand::Status(_) => "status",
+            };
+            assert_eq!(actual, expected);
+        }
     }
 }

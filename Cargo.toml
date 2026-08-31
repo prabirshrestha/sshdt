@@ -29,6 +29,8 @@ cli = [
     "dep:anyhow",
     "dep:tracing-subscriber",
     "dep:tracing-appender",
+    "dep:windows-registry",
+    "dep:windows-result",
 ]
 
 [dependencies]
@@ -75,6 +77,10 @@ tracing-subscriber = { version = "0.3", features = [
     "fmt",
 ], optional = true }
 tracing-appender = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = { version = "0.6", optional = true }
+windows-result = { version = "0.4", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
