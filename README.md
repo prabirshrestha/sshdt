@@ -56,6 +56,26 @@ sshdt service stop
 sshdt service uninstall
 ```
 
+Store sshdt server settings in `%USERPROFILE%\.sshdt\sshd_config`. Keep the
+OpenSSH authorized keys file in `%USERPROFILE%\.ssh\authorized_keys`. For
+example:
+
+```text
+ListenAddress 0.0.0.0
+Port 2222
+AuthorizedKeysFile C:\Users\me\.ssh\authorized_keys
+```
+
+Install the config and start the process:
+
+```powershell
+sshdt --config "$env:USERPROFILE\.sshdt\sshd_config" service install
+sshdt service start
+```
+
+After you edit the config, run `sshdt service restart` to apply the changes.
+Use `127.0.0.1` instead of `0.0.0.0` if only local clients must connect.
+
 `service install` saves the server options that appear before `service`. Relative
 file and directory paths are converted to absolute paths. Run the command again
 to replace the saved options. `start`, `stop`, and `restart` control the installed
