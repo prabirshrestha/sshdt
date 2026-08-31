@@ -123,6 +123,11 @@ enum ServiceCommand {
     Install(InstallService),
     Uninstall(UninstallService),
     Status(ServiceStatus),
+    Start(StartService),
+    Stop(StopService),
+    Restart(RestartService),
+    Logs(ServiceLogs),
+    Run(RunService),
 }
 
 /// Install sshdt as a launch-at-login program.
@@ -140,6 +145,35 @@ struct UninstallService {}
 #[argh(subcommand, name = "status")]
 struct ServiceStatus {}
 
+/// Start the installed sshdt program now.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "start")]
+struct StartService {}
+
+/// Stop the running sshdt program.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "stop")]
+struct StopService {}
+
+/// Restart the installed sshdt program.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "restart")]
+struct RestartService {}
+
+/// Print the sshdt service log.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "logs")]
+struct ServiceLogs {
+    /// continue printing new log entries
+    #[argh(switch, short = 'f')]
+    follow: bool,
+}
+
+/// Run sshdt under launch-at-login process control.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "run")]
+struct RunService {}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Args = argh::from_env();
@@ -149,38 +183,85 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if matches!(
+        &args.command,
+        Some(Command::Service(ServiceArgs {
+            command: ServiceCommand::Run(_)
+        }))
+    ) {
+        #[cfg(not(windows))]
+        anyhow::bail!("service mode is currently supported only on Windows");
+
+        #[cfg(windows)]
+        return run_server(&args, true).await;
+    }
+
     if let Some(Command::Service(service_args)) = &args.command {
         return manage_service(service_args, &args);
     }
 
-    let _log_guard = init_logging(&args)?;
+    run_server(&args, false).await
+}
 
-    let config = build_config(&args).context("invalid configuration")?;
-    let bind = std::net::SocketAddr::new(config.bind, config.port);
+async fn run_server(args: &Args, _service_mode: bool) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    let service_mode = _service_mode;
+    #[cfg(not(windows))]
+    let service_mode = false;
+    let service_run = service_mode.then(service::RunGuard::acquire).transpose()?;
 
-    let server = Server::from_config(config).context("failed to build server")?;
-    let handle = server
-        .serve()
-        .await
-        .with_context(|| format!("failed to bind {bind}"))?;
+    let _log_guard = init_logging(args, service_mode)?;
+    let result = async {
+        let config = build_config(args).context("invalid configuration")?;
+        let bind = std::net::SocketAddr::new(config.bind, config.port);
 
-    tracing::info!(addr = %handle.local_addr(), "sshdt is ready — press Ctrl-C to stop");
+        let server = Server::from_config(config).context("failed to build server")?;
+        let handle = server
+            .serve()
+            .await
+            .with_context(|| format!("failed to bind {bind}"))?;
 
-    tokio::signal::ctrl_c()
-        .await
-        .context("failed to listen for Ctrl-C")?;
-    tracing::info!("shutting down");
-    handle.shutdown().await;
-    Ok(())
+        if let Some(service_run) = &service_run {
+            service_run.mark_ready()?;
+        }
+
+        tracing::info!(addr = %handle.local_addr(), "sshdt is ready");
+
+        if let Some(service_run) = &service_run {
+            service_run.wait_for_stop().await?;
+        } else {
+            tokio::signal::ctrl_c()
+                .await
+                .context("failed to listen for Ctrl-C")?;
+        }
+        tracing::info!("shutting down");
+        handle.shutdown().await;
+        Ok(())
+    }
+    .await;
+    if service_mode && let Err(error) = &result {
+        tracing::error!(error = %error, "sshdt service stopped with an error");
+    }
+    result
 }
 
 fn manage_service(service_args: &ServiceArgs, args: &Args) -> anyhow::Result<()> {
-    match service_args.command {
+    match &service_args.command {
         ServiceCommand::Install(_) => {
             service::manage(service::Action::Install, startup_args(args)?)
         }
         ServiceCommand::Uninstall(_) => service::manage(service::Action::Uninstall, Vec::new()),
         ServiceCommand::Status(_) => service::manage(service::Action::Status, Vec::new()),
+        ServiceCommand::Start(_) => service::manage(service::Action::Start, Vec::new()),
+        ServiceCommand::Stop(_) => service::manage(service::Action::Stop, Vec::new()),
+        ServiceCommand::Restart(_) => service::manage(service::Action::Restart, Vec::new()),
+        ServiceCommand::Logs(logs) => service::manage(
+            service::Action::Logs {
+                follow: logs.follow,
+            },
+            Vec::new(),
+        ),
+        ServiceCommand::Run(_) => unreachable!("service run is handled before management actions"),
     }
 }
 
@@ -317,7 +398,7 @@ fn build_config(args: &Args) -> anyhow::Result<Config> {
 /// Install the process-global `tracing` subscriber. When `-E/--log-file` is
 /// given, logs are appended to that file (returning the appender's guard, which
 /// must be kept alive); otherwise they go to stderr.
-fn init_logging(args: &Args) -> anyhow::Result<Option<WorkerGuard>> {
+fn init_logging(args: &Args, service_mode: bool) -> anyhow::Result<Option<WorkerGuard>> {
     let level = if args.quiet {
         "error"
     } else if args.debug || args.verbose {
@@ -329,7 +410,27 @@ fn init_logging(args: &Args) -> anyhow::Result<Option<WorkerGuard>> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("sshdt={level},warn")));
 
-    if let Some(path) = &args.log_file {
+    if service_mode && args.log_file.is_none() {
+        let directory = service::default_log_directory()?;
+        let file = tracing_appender::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix("sshdt")
+            .filename_suffix("log")
+            .max_log_files(7)
+            .build(&directory)
+            .with_context(|| {
+                format!(
+                    "failed to initialize service logs in {}",
+                    directory.display()
+                )
+            })?;
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(file)
+            .init();
+        Ok(None)
+    } else if let Some(path) = &args.log_file {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -353,7 +454,7 @@ fn init_logging(args: &Args) -> anyhow::Result<Option<WorkerGuard>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, Command, ServiceCommand, startup_args};
+    use super::{Args, Command, ServiceCommand, ServiceLogs, startup_args};
     use argh::FromArgs;
 
     fn parse(command: &[&str]) -> Args {
@@ -404,11 +505,34 @@ mod tests {
     }
 
     #[test]
+    fn service_install_without_options_uses_server_defaults() {
+        let args = parse(&["service", "install"]);
+        assert!(startup_args(&args).unwrap().is_empty());
+    }
+
+    #[test]
+    fn service_logs_follow_parses() {
+        let args = parse(&["service", "logs", "--follow"]);
+        let Some(Command::Service(service)) = args.command else {
+            panic!("expected service command");
+        };
+        assert!(matches!(
+            service.command,
+            ServiceCommand::Logs(ServiceLogs { follow: true })
+        ));
+    }
+
+    #[test]
     fn service_commands_parse() {
         for (name, expected) in [
             ("install", "install"),
             ("uninstall", "uninstall"),
             ("status", "status"),
+            ("start", "start"),
+            ("stop", "stop"),
+            ("restart", "restart"),
+            ("logs", "logs"),
+            ("run", "run"),
         ] {
             let args = parse(&["service", name]);
             let Some(Command::Service(service)) = args.command else {
@@ -418,6 +542,11 @@ mod tests {
                 ServiceCommand::Install(_) => "install",
                 ServiceCommand::Uninstall(_) => "uninstall",
                 ServiceCommand::Status(_) => "status",
+                ServiceCommand::Start(_) => "start",
+                ServiceCommand::Stop(_) => "stop",
+                ServiceCommand::Restart(_) => "restart",
+                ServiceCommand::Logs(_) => "logs",
+                ServiceCommand::Run(_) => "run",
             };
             assert_eq!(actual, expected);
         }

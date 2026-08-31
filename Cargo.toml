@@ -31,6 +31,7 @@ cli = [
     "dep:tracing-appender",
     "dep:windows-registry",
     "dep:windows-result",
+    "dep:windows-sys",
 ]
 
 [dependencies]
@@ -81,6 +82,11 @@ tracing-appender = { version = "0.2", optional = true }
 [target.'cfg(windows)'.dependencies]
 windows-registry = { version = "0.6", optional = true }
 windows-result = { version = "0.4", optional = true }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

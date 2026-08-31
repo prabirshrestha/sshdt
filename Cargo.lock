@@ -1997,6 +1997,7 @@ dependencies = [
  "tracing-subscriber",
  "windows-registry",
  "windows-result",
+ "windows-sys",
 ]
 
 [[package]]

@@ -48,13 +48,23 @@ On Windows, sshdt can register itself to start when the current user signs in:
 
 ```powershell
 sshdt --config C:\Users\me\.sshdt\sshd_config service install
+sshdt service start
 sshdt service status
+sshdt service restart
+sshdt service logs --follow
+sshdt service stop
 sshdt service uninstall
 ```
 
 `service install` saves the server options that appear before `service`. Relative
 file and directory paths are converted to absolute paths. Run the command again
-to replace the saved options.
+to replace the saved options. `start`, `stop`, and `restart` control the installed
+process without changing whether it starts at login. `status` reports both states.
+
+By default, the service writes daily rotating logs to `%USERPROFILE%\.sshdt\logs`
+and keeps up to seven files. `service logs` prints the current log. Add
+`--follow` or `-f` to continue printing new entries across log rotation. If
+`--log-file` was set during installation, these commands use that file instead.
 
 If `--config` is not set, sshdt uses its normal built-in defaults when it starts
 at login. These include `127.0.0.1:2222`, the persistent host key at
@@ -219,7 +229,11 @@ sshdt [OPTIONS] [<command>]
 Commands:
   service install                Launch sshdt at login for the current Windows user
   service uninstall              Remove sshdt from launch at login
-  service status                 Show whether launch at login is enabled
+  service status                 Show launch-at-login and process state
+  service start                  Start the installed sshdt process
+  service stop                   Stop the running sshdt process
+  service restart                Restart the installed sshdt process
+  service logs [-f|--follow]     Print or follow the rotating service log
 ```
 
 Precedence is **flags > config file > defaults**. `RUST_LOG` overrides the `-d`/`-q` log level.
