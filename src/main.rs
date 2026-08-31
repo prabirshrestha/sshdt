@@ -4,7 +4,7 @@
 //! The library never installs a `tracing` subscriber — that is done here.
 
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use argh::FromArgs;
@@ -26,7 +26,7 @@ struct Args {
     #[argh(option, short = 'h')]
     host_key: Vec<PathBuf>,
 
-    /// load a config file: sshd_config format, or TOML by .toml extension
+    /// load a config file [default: ~/.ssh/sshdt_config when present]
     #[argh(option, short = 'f')]
     config: Option<PathBuf>,
 
@@ -336,8 +336,10 @@ fn push_path_option(
 
 /// Build the effective [`Config`]: defaults < config file < flags (ADR 0019).
 fn build_config(args: &Args) -> anyhow::Result<Config> {
-    let mut config = match &args.config {
-        Some(path) => Config::load_file(path)
+    let home = dirs::home_dir();
+    let config_path = select_config_path(args.config.as_deref(), home.as_deref());
+    let mut config = match config_path {
+        Some(path) => Config::load_file(&path)
             .with_context(|| format!("failed to load config file {}", path.display()))?,
         None => Config::default(),
     };
@@ -385,6 +387,13 @@ fn build_config(args: &Args) -> anyhow::Result<Config> {
     }
 
     Ok(config)
+}
+
+fn select_config_path(explicit: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    explicit.map(Path::to_path_buf).or_else(|| {
+        let path = home?.join(".ssh").join("sshdt_config");
+        path.exists().then_some(path)
+    })
 }
 
 /// Install the process-global `tracing` subscriber. When `-E/--log-file` is
@@ -446,7 +455,7 @@ fn init_logging(args: &Args, service_mode: bool) -> anyhow::Result<Option<Worker
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, Command, ServiceCommand, ServiceLogs, startup_args};
+    use super::{Args, Command, ServiceCommand, ServiceLogs, select_config_path, startup_args};
     use argh::FromArgs;
 
     fn parse(command: &[&str]) -> Args {
@@ -497,9 +506,34 @@ mod tests {
     }
 
     #[test]
-    fn service_install_without_options_uses_server_defaults() {
+    fn service_install_does_not_save_the_implicit_config_path() {
         let args = parse(&["service", "install"]);
         assert!(startup_args(&args).unwrap().is_empty());
+    }
+
+    #[test]
+    fn selects_implicit_config_only_when_it_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(select_config_path(None, Some(directory.path())), None);
+
+        let ssh_directory = directory.path().join(".ssh");
+        std::fs::create_dir(&ssh_directory).unwrap();
+        let implicit = ssh_directory.join("sshdt_config");
+        std::fs::write(&implicit, "Port 2200\n").unwrap();
+        assert_eq!(
+            select_config_path(None, Some(directory.path())),
+            Some(implicit)
+        );
+    }
+
+    #[test]
+    fn explicit_config_path_overrides_the_implicit_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let explicit = directory.path().join("custom_config");
+        assert_eq!(
+            select_config_path(Some(&explicit), Some(directory.path())),
+            Some(explicit)
+        );
     }
 
     #[test]

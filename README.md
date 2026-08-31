@@ -47,7 +47,7 @@ Requires the toolchain pinned in `rust-toolchain.toml` (latest stable; edition 2
 On Windows, sshdt can register itself to start when the current user signs in:
 
 ```powershell
-sshdt --config C:\Users\me\.ssh\sshdt_config service install
+sshdt service install
 sshdt service start
 sshdt service status
 sshdt service restart
@@ -69,7 +69,7 @@ AuthorizedKeysFile C:\Users\me\.ssh\authorized_keys
 Install the config and start the process:
 
 ```powershell
-sshdt --config "$env:USERPROFILE\.ssh\sshdt_config" service install
+sshdt service install
 sshdt service start
 ```
 
@@ -86,10 +86,11 @@ and keeps up to seven files. `service logs` prints the current log. Add
 `--follow` or `-f` to continue printing new entries across log rotation. If
 `--log-file` was set during installation, these commands use that file instead.
 
-If `--config` is not set, sshdt uses its normal built-in defaults when it starts
-at login. These include `127.0.0.1:2222`, the persistent host key at
-`%USERPROFILE%\.sshdt\host_ed25519`, anonymous authentication, and the default
-Windows shell.
+If `--config` is not set, sshdt automatically loads
+`%USERPROFILE%\.ssh\sshdt_config` when that file exists. If it does not exist,
+sshdt uses its normal built-in defaults. These include `127.0.0.1:2222`, the
+persistent host key at `%USERPROFILE%\.sshdt\host_ed25519`, anonymous
+authentication, and the default Windows shell.
 
 This uses the current user's Windows `Run` registry entry, like AI Proxy's
 **Launch at login** setting. It needs no administrator rights and runs sshdt as
@@ -227,7 +228,7 @@ sshdt [OPTIONS] [<command>]
   -p, --port <PORT>              Port to listen on                     [default: 2222]
   -h, --host-key <FILE>          Host key file (generated if missing)  [default: ~/.sshdt/host_ed25519]
                                  (repeatable)
-  -f, --config <FILE>            Load config: sshd_config format, or TOML by .toml extension
+  -f, --config <FILE>            Load config [default: ~/.ssh/sshdt_config when present]
   -E, --log-file <FILE>          Append logs to FILE instead of stderr
   -d, --debug                    Debug logging (-v alias)
   -q, --quiet                    Errors only
@@ -256,11 +257,14 @@ Commands:
   service logs [-f|--follow]     Print or follow the rotating service log
 ```
 
-Precedence is **flags > config file > defaults**. `RUST_LOG` overrides the `-d`/`-q` log level.
+Precedence is **flags > explicit `--config` or `~/.ssh/sshdt_config` > defaults**.
+`RUST_LOG` overrides the `-d`/`-q` log level.
 
 ## Config file (`-f`)
 
-`-f <file>` loads an **`sshd_config`-format** file (or **TOML** when the extension is `.toml`).
+Without `-f`, sshdt loads `~/.ssh/sshdt_config` when it exists. `-f <file>`
+selects a different config file. Config files use the **`sshd_config` format**
+(or **TOML** when the extension is `.toml`).
 Honored `sshd_config` directives (others are warned about and ignored):
 
 | Directive | Maps to |
