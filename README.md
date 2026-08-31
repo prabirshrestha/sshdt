@@ -47,7 +47,7 @@ Requires the toolchain pinned in `rust-toolchain.toml` (latest stable; edition 2
 On Windows, sshdt can register itself to start when the current user signs in:
 
 ```powershell
-sshdt --config C:\Users\me\.sshdt\sshd_config service install
+sshdt --config C:\Users\me\.ssh\sshdt_config service install
 sshdt service start
 sshdt service status
 sshdt service restart
@@ -56,8 +56,8 @@ sshdt service stop
 sshdt service uninstall
 ```
 
-Store sshdt server settings in `%USERPROFILE%\.sshdt\sshd_config`. Keep the
-OpenSSH authorized keys file in `%USERPROFILE%\.ssh\authorized_keys`. For
+Store sshdt server settings in `%USERPROFILE%\.ssh\sshdt_config`, beside the
+OpenSSH authorized keys file at `%USERPROFILE%\.ssh\authorized_keys`. For
 example:
 
 ```text
@@ -69,7 +69,7 @@ AuthorizedKeysFile C:\Users\me\.ssh\authorized_keys
 Install the config and start the process:
 
 ```powershell
-sshdt --config "$env:USERPROFILE\.sshdt\sshd_config" service install
+sshdt --config "$env:USERPROFILE\.ssh\sshdt_config" service install
 sshdt service start
 ```
 
