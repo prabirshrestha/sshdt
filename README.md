@@ -64,7 +64,7 @@ example:
 ```text
 ListenAddress 0.0.0.0
 Port 2222
-AuthorizedKeysFile C:\Users\me\.ssh\authorized_keys
+AuthorizedKeysFile .ssh/authorized_keys
 ```
 
 Enable launch at login and start the process:
@@ -76,6 +76,8 @@ sshdt service start
 
 After you edit the config, run `sshdt service restart` to apply the changes.
 Use `127.0.0.1` instead of `0.0.0.0` if only local clients must connect.
+As in OpenSSH, a relative `AuthorizedKeysFile` path starts at the current
+user's home directory.
 
 `service enable` saves the server options that appear before `service`. Relative
 file and directory paths are converted to absolute paths. Run the command again

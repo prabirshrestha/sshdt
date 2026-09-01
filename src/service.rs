@@ -1,5 +1,7 @@
 //! Windows launch-at-login and process management for the CLI.
 
+#[cfg(any(windows, test))]
+use std::path::Path;
 use std::path::PathBuf;
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -34,6 +36,11 @@ pub(crate) fn default_log_directory() -> anyhow::Result<PathBuf> {
     let directory = home.join(".sshdt").join("logs");
     std::fs::create_dir_all(&directory)?;
     Ok(directory)
+}
+
+#[cfg(windows)]
+pub(crate) fn saved_startup_args() -> anyhow::Result<Vec<String>> {
+    windows::saved_args()
 }
 
 pub(crate) struct RunGuard {
@@ -82,40 +89,18 @@ impl RunGuard {
 }
 
 #[cfg(any(windows, test))]
-fn quote_windows_argument(argument: &str) -> String {
-    if !argument.is_empty()
-        && !argument
-            .chars()
-            .any(|character| character.is_whitespace() || character == '"')
-    {
-        return argument.to_owned();
-    }
-
-    let mut quoted = String::from("\"");
-    let mut backslashes = 0;
-    for character in argument.chars() {
-        match character {
-            '\\' => backslashes += 1,
-            '"' => {
-                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
-                quoted.push('"');
-                backslashes = 0;
-            }
-            _ => {
-                quoted.push_str(&"\\".repeat(backslashes));
-                quoted.push(character);
-                backslashes = 0;
-            }
-        }
-    }
-    quoted.push_str(&"\\".repeat(backslashes * 2));
-    quoted.push('"');
-    quoted
+fn launch_command(executable: &Path) -> String {
+    let raw = executable.to_string_lossy();
+    let clean = raw
+        .strip_prefix(r"\\?\UNC\")
+        .map(|path| format!(r"\\{path}"))
+        .unwrap_or_else(|| raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_owned());
+    format!("\"{clean}\" --service-run")
 }
 
 #[cfg(windows)]
 mod windows {
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, c_void};
     use std::fs::File;
     use std::io::{Read, Write};
     use std::os::windows::ffi::OsStrExt;
@@ -128,15 +113,23 @@ mod windows {
     use windows_registry::CURRENT_USER;
     use windows_result::HRESULT;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError, HANDLE,
-        WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER,
+        GetLastError, HANDLE, LocalFree, SetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+        TokenUser,
     };
     use windows_sys::Win32::System::Threading::{
-        CREATE_NO_WINDOW, CreateEventW, EVENT_MODIFY_STATE, OpenEventW,
-        SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForSingleObject,
+        CREATE_NO_WINDOW, CreateEventW, EVENT_MODIFY_STATE, GetCurrentProcess, OpenEventW,
+        OpenProcessToken, SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForSingleObject,
     };
 
-    use super::{Action, default_log_directory, quote_windows_argument};
+    use super::{Action, default_log_directory, launch_command};
 
     const APP_NAME: &str = "sshdt";
     const SETTINGS_KEY: &str = r"SOFTWARE\sshdt";
@@ -149,9 +142,6 @@ mod windows {
         0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
     const FILE_NOT_FOUND: HRESULT = HRESULT::from_win32(2);
-    const RUNNING_EVENT_NAME: &str = r"Local\sshdt-service-running";
-    const STOP_EVENT_NAME: &str = r"Local\sshdt-service-stop";
-    const READY_EVENT_NAME: &str = r"Local\sshdt-service-ready";
     const WAIT_TIMEOUT_MS: u32 = 10_000;
 
     pub(super) fn manage(action: Action, startup_args: &[String]) -> anyhow::Result<()> {
@@ -166,10 +156,11 @@ mod windows {
                 println!("disabled sshdt launch at login for the current Windows user");
             }
             Action::Uninstall => {
-                uninstall()?;
+                uninstall(&EventNames::current()?)?;
                 println!("uninstalled sshdt launch-at-login settings for the current Windows user");
             }
             Action::Status => {
+                let names = EventNames::current()?;
                 println!(
                     "sshdt launch at login is {}; process is {}",
                     if launch_at_login_enabled()? {
@@ -177,14 +168,19 @@ mod windows {
                     } else {
                         "disabled"
                     },
-                    if is_running()? { "running" } else { "stopped" }
+                    if is_running(&names)? {
+                        "running"
+                    } else {
+                        "stopped"
+                    }
                 );
             }
-            Action::Start => start()?,
-            Action::Stop => stop(true)?,
+            Action::Start => start(&EventNames::current()?)?,
+            Action::Stop => stop(&EventNames::current()?, true)?,
             Action::Restart => {
-                stop(false)?;
-                start()?;
+                let names = EventNames::current()?;
+                stop(&names, false)?;
+                start(&names)?;
             }
             Action::Logs { follow } => show_logs(follow)?,
         }
@@ -193,12 +189,7 @@ mod windows {
 
     fn enable(startup_args: &[String]) -> anyhow::Result<()> {
         let executable = current_executable()?;
-        let mut command = launch_app_path(&executable);
-        for argument in startup_args {
-            command.push(' ');
-            command.push_str(&quote_windows_argument(argument));
-        }
-        command.push_str(" --service-run");
+        let command = launch_command(&executable);
 
         let settings = CURRENT_USER
             .create(SETTINGS_KEY)
@@ -231,8 +222,8 @@ mod windows {
         remove_value(RUN_KEY, APP_NAME, "failed to disable sshdt launch at login")
     }
 
-    fn uninstall() -> anyhow::Result<()> {
-        stop(false)?;
+    fn uninstall(names: &EventNames) -> anyhow::Result<()> {
+        stop(names, false)?;
         disable()?;
         remove_value(
             STARTUP_APPROVED_KEY,
@@ -259,33 +250,36 @@ mod windows {
         }
     }
 
-    fn start() -> anyhow::Result<()> {
+    fn start(names: &EventNames) -> anyhow::Result<()> {
         ensure!(
             is_configured()?,
             "sshdt is not configured; run `sshdt service enable` first"
         );
-        if is_running()? {
+        if is_running(names)? {
             println!("sshdt is already running");
             return Ok(());
         }
 
         let mut command = Command::new(saved_executable()?);
         command
-            .args(saved_args()?)
             .arg("--service-run")
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = command.spawn().context("failed to start sshdt")?;
-        wait_for_ready(&mut child, WAIT_TIMEOUT_MS)
-            .context("sshdt did not become ready; run `sshdt service logs` for details")?;
+        if let Err(error) = wait_for_ready(&mut child, names, WAIT_TIMEOUT_MS) {
+            cleanup_failed_start(&mut child, names)
+                .with_context(|| format!("failed to stop sshdt after startup error: {error:#}"))?;
+            return Err(error)
+                .context("sshdt did not become ready; run `sshdt service logs` for details");
+        }
         println!("started sshdt");
         Ok(())
     }
 
-    fn stop(print_status: bool) -> anyhow::Result<()> {
-        let Some(event) = stop_event()? else {
+    fn stop(names: &EventNames, print_status: bool) -> anyhow::Result<()> {
+        let Some(event) = stop_event(names)? else {
             if print_status {
                 println!("sshdt is already stopped");
             }
@@ -297,22 +291,22 @@ mod windows {
             "failed to request sshdt shutdown: {}",
             std::io::Error::last_os_error()
         );
-        wait_until_stopped(WAIT_TIMEOUT_MS)?;
+        wait_until_stopped(names, WAIT_TIMEOUT_MS)?;
         if print_status {
             println!("stopped sshdt");
         }
         Ok(())
     }
 
-    fn stop_event() -> anyhow::Result<Option<OwnedHandle>> {
+    fn stop_event(names: &EventNames) -> anyhow::Result<Option<OwnedHandle>> {
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         loop {
-            if let Some(event) = open_event(STOP_EVENT_NAME, EVENT_MODIFY_STATE)? {
+            if let Some(event) = open_event(&names.stop, EVENT_MODIFY_STATE)? {
                 return Ok(Some(event));
             }
-            if !is_running()? || std::time::Instant::now() >= deadline {
+            if !is_running(names)? || std::time::Instant::now() >= deadline {
                 ensure!(
-                    !is_running()?,
+                    !is_running(names)?,
                     "sshdt is running but cannot accept a stop request"
                 );
                 return Ok(None);
@@ -321,7 +315,7 @@ mod windows {
         }
     }
 
-    fn saved_args() -> anyhow::Result<Vec<String>> {
+    pub(super) fn saved_args() -> anyhow::Result<Vec<String>> {
         try_saved_args()?.ok_or_else(|| anyhow::anyhow!("sshdt service options are not configured"))
     }
 
@@ -388,13 +382,13 @@ mod windows {
         }
     }
 
-    fn is_running() -> anyhow::Result<bool> {
-        Ok(open_event(RUNNING_EVENT_NAME, SYNCHRONIZATION_SYNCHRONIZE)?.is_some())
+    fn is_running(names: &EventNames) -> anyhow::Result<bool> {
+        Ok(open_event(&names.running, SYNCHRONIZATION_SYNCHRONIZE)?.is_some())
     }
 
-    fn wait_until_stopped(timeout_ms: u32) -> anyhow::Result<()> {
+    fn wait_until_stopped(names: &EventNames, timeout_ms: u32) -> anyhow::Result<()> {
         let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms.into());
-        while is_running()? {
+        while is_running(names)? {
             ensure!(
                 std::time::Instant::now() < deadline,
                 "timed out while stopping sshdt"
@@ -404,16 +398,20 @@ mod windows {
         Ok(())
     }
 
-    fn wait_for_ready(child: &mut std::process::Child, timeout_ms: u32) -> anyhow::Result<()> {
+    fn wait_for_ready(
+        child: &mut std::process::Child,
+        names: &EventNames,
+        timeout_ms: u32,
+    ) -> anyhow::Result<()> {
         let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms.into());
         let mut observed_running = false;
         loop {
-            if let Some(ready) = open_event(READY_EVENT_NAME, SYNCHRONIZATION_SYNCHRONIZE)?
+            if let Some(ready) = open_event(&names.ready, SYNCHRONIZATION_SYNCHRONIZE)?
                 && unsafe { WaitForSingleObject(ready.0, 0) } == WAIT_OBJECT_0
             {
                 return Ok(());
             }
-            let running = is_running()?;
+            let running = is_running(names)?;
             observed_running |= running;
             if observed_running && !running {
                 anyhow::bail!("sshdt stopped before it became ready");
@@ -430,6 +428,50 @@ mod windows {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    fn cleanup_failed_start(
+        child: &mut std::process::Child,
+        names: &EventNames,
+    ) -> anyhow::Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut stop_requested = false;
+        loop {
+            if child
+                .try_wait()
+                .context("failed to inspect sshdt during startup cleanup")?
+                .is_some()
+            {
+                return Ok(());
+            }
+            if !stop_requested {
+                match open_event(&names.stop, EVENT_MODIFY_STATE) {
+                    Ok(Some(event)) if unsafe { SetEvent(event.0) } != 0 => {
+                        stop_requested = true;
+                    }
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) => {}
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        if child
+            .try_wait()
+            .context("failed to inspect sshdt before forced startup cleanup")?
+            .is_none()
+        {
+            child
+                .kill()
+                .context("failed to terminate sshdt after startup error")?;
+        }
+        child
+            .wait()
+            .context("failed to reap sshdt after startup error")?;
+        Ok(())
     }
 
     fn show_logs(follow: bool) -> anyhow::Result<()> {
@@ -513,6 +555,122 @@ mod windows {
         OsStr::new(value).encode_wide().chain(Some(0)).collect()
     }
 
+    struct EventNames {
+        running: String,
+        stop: String,
+        ready: String,
+    }
+
+    impl EventNames {
+        fn current() -> anyhow::Result<Self> {
+            Ok(Self::for_sid(&current_user_sid()?))
+        }
+
+        fn for_sid(sid: &str) -> Self {
+            Self {
+                running: format!(r"Global\sshdt-service-{sid}-running"),
+                stop: format!(r"Global\sshdt-service-{sid}-stop"),
+                ready: format!(r"Global\sshdt-service-{sid}-ready"),
+            }
+        }
+    }
+
+    fn current_user_sid() -> anyhow::Result<String> {
+        let mut token = std::ptr::null_mut();
+        ensure!(
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } != 0,
+            "failed to open the current process token: {}",
+            std::io::Error::last_os_error()
+        );
+        let token = OwnedHandle(token);
+
+        let mut length = 0;
+        unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut length) };
+        ensure!(
+            unsafe { GetLastError() } == ERROR_INSUFFICIENT_BUFFER,
+            "failed to size the current user token: {}",
+            std::io::Error::last_os_error()
+        );
+        let word_size = std::mem::size_of::<usize>();
+        let mut buffer = vec![0usize; (length as usize).div_ceil(word_size)];
+        ensure!(
+            unsafe {
+                GetTokenInformation(
+                    token.0,
+                    TokenUser,
+                    buffer.as_mut_ptr().cast(),
+                    length,
+                    &mut length,
+                )
+            } != 0,
+            "failed to read the current user token: {}",
+            std::io::Error::last_os_error()
+        );
+        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        let mut text = std::ptr::null_mut();
+        ensure!(
+            unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) } != 0,
+            "failed to format the current user SID: {}",
+            std::io::Error::last_os_error()
+        );
+        let text = OwnedLocal(text.cast());
+        let mut length = 0;
+        while unsafe { *text.0.cast::<u16>().add(length) } != 0 {
+            length += 1;
+        }
+        Ok(String::from_utf16_lossy(unsafe {
+            std::slice::from_raw_parts(text.0.cast::<u16>(), length)
+        }))
+    }
+
+    struct OwnedLocal(*mut c_void);
+
+    impl Drop for OwnedLocal {
+        fn drop(&mut self) {
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    struct EventSecurity(PSECURITY_DESCRIPTOR);
+
+    impl EventSecurity {
+        fn for_user(sid: &str) -> anyhow::Result<Self> {
+            let descriptor = wide(&event_security_descriptor(sid));
+            let mut security_descriptor = std::ptr::null_mut();
+            ensure!(
+                unsafe {
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        descriptor.as_ptr(),
+                        SDDL_REVISION_1,
+                        &mut security_descriptor,
+                        std::ptr::null_mut(),
+                    )
+                } != 0,
+                "failed to create sshdt event security: {}",
+                std::io::Error::last_os_error()
+            );
+            Ok(Self(security_descriptor))
+        }
+
+        fn attributes(&self) -> SECURITY_ATTRIBUTES {
+            SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: self.0,
+                bInheritHandle: 0,
+            }
+        }
+    }
+
+    fn event_security_descriptor(sid: &str) -> String {
+        format!(r"D:P(A;;GA;;;SY)(A;;GA;;;{sid})")
+    }
+
+    impl Drop for EventSecurity {
+        fn drop(&mut self) {
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
     struct OwnedHandle(HANDLE);
 
     impl Drop for OwnedHandle {
@@ -547,22 +705,29 @@ mod windows {
 
     impl RunGuard {
         pub(super) fn acquire() -> anyhow::Result<Self> {
-            let running_name = wide(RUNNING_EVENT_NAME);
-            let running = unsafe { CreateEventW(std::ptr::null(), 1, 1, running_name.as_ptr()) };
+            let sid = current_user_sid()?;
+            let names = EventNames::for_sid(&sid);
+            let security = EventSecurity::for_user(&sid)?;
+            let security_attributes = security.attributes();
+            let running_name = wide(&names.running);
+            unsafe { SetLastError(0) };
+            let running =
+                unsafe { CreateEventW(&security_attributes, 1, 1, running_name.as_ptr()) };
+            let create_error = unsafe { GetLastError() };
             ensure!(
                 !running.is_null(),
                 "failed to create sshdt running event: {}",
-                std::io::Error::last_os_error()
+                std::io::Error::from_raw_os_error(create_error as i32)
             );
-            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-                unsafe { CloseHandle(running) };
+            let running = OwnedHandle(running);
+            if create_error == ERROR_ALREADY_EXISTS {
                 anyhow::bail!("sshdt is already running");
             }
 
             Ok(Self {
-                _running: OwnedHandle(running),
-                stop: create_event(STOP_EVENT_NAME)?,
-                ready: create_event(READY_EVENT_NAME)?,
+                _running: running,
+                stop: create_event(&names.stop, &security_attributes)?,
+                ready: create_event(&names.ready, &security_attributes)?,
             })
         }
 
@@ -587,9 +752,9 @@ mod windows {
         }
     }
 
-    fn create_event(name: &str) -> anyhow::Result<OwnedHandle> {
+    fn create_event(name: &str, security: &SECURITY_ATTRIBUTES) -> anyhow::Result<OwnedHandle> {
         let name = wide(name);
-        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) };
+        let handle = unsafe { CreateEventW(security, 1, 0, name.as_ptr()) };
         ensure!(
             !handle.is_null(),
             "failed to create sshdt service event: {}",
@@ -598,35 +763,39 @@ mod windows {
         Ok(OwnedHandle(handle))
     }
 
-    fn launch_app_path(executable: &Path) -> String {
-        let raw = executable.to_string_lossy();
-        let clean = raw
-            .strip_prefix(r"\\?\UNC\")
-            .map(|path| format!(r"\\{path}"))
-            .unwrap_or_else(|| raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_owned());
-        format!("\"{clean}\"")
+    #[cfg(test)]
+    mod tests {
+        use super::{EventNames, event_security_descriptor};
+
+        #[test]
+        fn events_are_global_and_scoped_to_the_user_sid() {
+            let sid = "S-1-5-21-42";
+            let names = EventNames::for_sid(sid);
+            assert_eq!(names.running, r"Global\sshdt-service-S-1-5-21-42-running");
+            assert_eq!(names.stop, r"Global\sshdt-service-S-1-5-21-42-stop");
+            assert_eq!(names.ready, r"Global\sshdt-service-S-1-5-21-42-ready");
+        }
+
+        #[test]
+        fn event_acl_allows_only_system_and_the_current_user() {
+            assert_eq!(
+                event_security_descriptor("S-1-5-21-42"),
+                "D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-21-42)"
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::quote_windows_argument;
+    use super::launch_command;
+    use std::path::Path;
 
     #[test]
-    fn windows_arguments_are_quoted_for_the_run_key() {
-        assert_eq!(quote_windows_argument("--port"), "--port");
+    fn windows_run_command_uses_only_the_service_bootstrap() {
         assert_eq!(
-            quote_windows_argument(r"C:\Program Files\sshdt config.toml"),
-            r#""C:\Program Files\sshdt config.toml""#
-        );
-        assert_eq!(quote_windows_argument(""), r#""""#);
-        assert_eq!(
-            quote_windows_argument(r#"say "hello""#),
-            r#""say \"hello\"""#
-        );
-        assert_eq!(
-            quote_windows_argument("C:\\trailing slash\\"),
-            r#""C:\trailing slash\\""#
+            launch_command(Path::new(r"C:\Program Files\sshdt.exe")),
+            r#""C:\Program Files\sshdt.exe" --service-run"#
         );
     }
 }

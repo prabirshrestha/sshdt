@@ -96,7 +96,7 @@ impl AuthConfig {
             authorized_keys.push(parse_public_key_line(line)?);
         }
         Ok(Self {
-            anonymous: !cfg.has_explicit_auth(),
+            anonymous: cfg.allow_anonymous && !cfg.has_explicit_auth(),
             password: cfg.password.clone(),
             authorized_keys,
         })
@@ -123,9 +123,6 @@ impl AuthConfig {
             if self.password.is_some() {
                 kinds.push(MethodKind::Password);
             }
-        }
-        if kinds.is_empty() {
-            kinds.push(MethodKind::None);
         }
         MethodSet::from(&kinds[..])
     }

@@ -11,7 +11,7 @@
 //! authorized-keys, not OS/PAM auth.
 
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::{Error, Result};
@@ -23,6 +23,8 @@ pub fn parse(input: &str) -> Result<Config> {
     // AcceptEnv accumulates across directives, replacing the default the first
     // time it appears.
     let mut accept_env_seen = false;
+    let mut password_disabled = false;
+    let mut pubkey_disabled = false;
     // HostKey / AuthorizedKeysFile replace the default (empty) and accumulate.
 
     for (lineno, raw) in input.lines().enumerate() {
@@ -56,19 +58,24 @@ pub fn parse(input: &str) -> Result<Config> {
                 }
             }
             "passwordauthentication" => {
-                if parse_yes_no(value) == Some(false) {
-                    config.password = None;
-                } else if parse_yes_no(value) == Some(true) && config.password.is_none() {
+                let enabled = parse_yes_no(value);
+                if enabled.is_some() {
+                    config.allow_anonymous = false;
+                }
+                if enabled == Some(false) {
+                    password_disabled = true;
+                } else if enabled == Some(true) && config.password.is_none() {
                     tracing::warn!(
-                        "PasswordAuthentication yes has no effect without a configured password (use --password)"
+                        "PasswordAuthentication yes requires a configured password (use --password)"
                     );
                 }
             }
             "pubkeyauthentication" => {
-                if parse_yes_no(value) == Some(false) {
-                    config.authorized_keys.clear();
-                    config.authorized_key_lines.clear();
+                let enabled = parse_yes_no(value);
+                if enabled.is_some() {
+                    config.allow_anonymous = false;
                 }
+                pubkey_disabled |= enabled == Some(false);
             }
             "allowtcpforwarding" => {
                 // sshd accepts yes/no/local/remote; anything non-"no" allows
@@ -114,6 +121,30 @@ pub fn parse(input: &str) -> Result<Config> {
         }
     }
 
+    if password_disabled {
+        config.password = None;
+    }
+    if pubkey_disabled {
+        config.authorized_keys.clear();
+        config.authorized_key_lines.clear();
+    }
+    Ok(config)
+}
+
+pub(crate) fn parse_for_user(input: &str, home: Option<&Path>) -> Result<Config> {
+    let mut config = parse(input)?;
+    for path in &mut config.authorized_keys {
+        if path.is_relative() {
+            let home = home.ok_or_else(|| Error::ConfigFile {
+                path: PathBuf::from("<sshd_config>"),
+                message: format!(
+                    "cannot resolve relative AuthorizedKeysFile {} without a home directory",
+                    path.display()
+                ),
+            })?;
+            *path = home.join(&*path);
+        }
+    }
     Ok(config)
 }
 
@@ -191,7 +222,7 @@ fn read_banner(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, strip_comment};
+    use super::{parse, parse_for_user, strip_comment};
     use std::path::PathBuf;
 
     #[test]
@@ -389,15 +420,51 @@ Port 2200   # trailing inline comment
     fn auth_toggles() {
         // PasswordAuthentication no clears a configured password (none here, so
         // it is simply a no-op and must not error).
-        assert!(
-            parse("PasswordAuthentication no\n")
-                .unwrap()
-                .password
-                .is_none()
-        );
+        let cfg = parse("PasswordAuthentication no\n").unwrap();
+        assert!(cfg.password.is_none());
+        assert!(!cfg.allow_anonymous);
         // PubkeyAuthentication no clears any accumulated key sources.
         let cfg = parse("AuthorizedKeysFile /k\nPubkeyAuthentication no\n").unwrap();
         assert!(cfg.authorized_keys.is_empty());
+        assert!(!cfg.allow_anonymous);
+        assert!(
+            !parse("PasswordAuthentication yes\n")
+                .unwrap()
+                .allow_anonymous
+        );
+        assert!(!parse("PubkeyAuthentication yes\n").unwrap().allow_anonymous);
+    }
+
+    #[test]
+    fn relative_authorized_keys_files_use_the_user_home() {
+        let home = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\ada")
+        } else {
+            PathBuf::from("/home/ada")
+        };
+        let absolute = if cfg!(windows) {
+            PathBuf::from(r"C:\ProgramData\sshdt\shared_keys")
+        } else {
+            PathBuf::from("/etc/ssh/shared_keys")
+        };
+        let cfg = parse_for_user(
+            &format!(
+                "AuthorizedKeysFile .ssh/authorized_keys {}\n",
+                absolute.display()
+            ),
+            Some(&home),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.authorized_keys,
+            [home.join(".ssh/authorized_keys"), absolute,]
+        );
+    }
+
+    #[test]
+    fn relative_authorized_keys_files_require_a_user_home() {
+        let error = parse_for_user("AuthorizedKeysFile .ssh/authorized_keys\n", None).unwrap_err();
+        assert!(error.to_string().contains("without a home directory"));
     }
 
     #[test]

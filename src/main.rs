@@ -196,7 +196,10 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("service mode is currently supported only on Windows");
 
         #[cfg(windows)]
-        return run_server(&args, true).await;
+        {
+            let args = parse_saved_service_args(service::saved_startup_args()?)?;
+            return run_server(&args, true).await;
+        }
     }
 
     if let Some(Command::Service(service_args)) = &args.command {
@@ -204,6 +207,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     run_server(&args, false).await
+}
+
+#[cfg(any(windows, test))]
+fn parse_saved_service_args(arguments: Vec<String>) -> anyhow::Result<Args> {
+    let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+    Args::from_args(&["sshdt"], &arguments).map_err(|error| {
+        anyhow::anyhow!(
+            "invalid saved sshdt service options: {}",
+            error.output.trim()
+        )
+    })
 }
 
 async fn run_server(args: &Args, _service_mode: bool) -> anyhow::Result<()> {
@@ -476,7 +490,10 @@ fn init_logging(args: &Args, service_mode: bool) -> anyhow::Result<Option<Worker
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, Command, ServiceCommand, ServiceLogs, select_config_path, startup_args};
+    use super::{
+        Args, Command, ServiceCommand, ServiceLogs, parse_saved_service_args, select_config_path,
+        startup_args,
+    };
     use argh::FromArgs;
 
     fn parse(command: &[&str]) -> Args {
@@ -524,6 +541,20 @@ mod tests {
                 "--no-forward",
             ]
         );
+    }
+
+    #[test]
+    fn service_bootstrap_parses_saved_options() {
+        let args = parse_saved_service_args(vec![
+            "--port".into(),
+            "2200".into(),
+            "--shell".into(),
+            "pwsh -NoLogo".into(),
+        ])
+        .unwrap();
+        assert_eq!(args.port, Some(2200));
+        assert_eq!(args.shell.as_deref(), Some("pwsh -NoLogo"));
+        assert!(!args.service_run);
     }
 
     #[test]
