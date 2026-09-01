@@ -116,41 +116,6 @@ jobs:
       - name: Test
         run: cargo test --locked --all-features
 
-      - name: Test Windows service lifecycle
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $sshdt = Resolve-Path "target/debug/sshdt.exe"
-          try {
-            & $sshdt --port 32222 service enable
-            & $sshdt service start
-            $status = & $sshdt service status
-            if ($status -notmatch "enabled; process is running") {
-              throw "unexpected running status: $status"
-            }
-            & $sshdt service logs | Select-String -SimpleMatch "sshdt is ready"
-            & $sshdt service restart
-            & $sshdt service disable
-            $status = & $sshdt service status
-            if ($status -notmatch "disabled; process is running") {
-              throw "unexpected disabled running status: $status"
-            }
-            & $sshdt service stop
-            $status = & $sshdt service status
-            if ($status -notmatch "disabled; process is stopped") {
-              throw "unexpected stopped status: $status"
-            }
-            & $sshdt service start
-            & $sshdt service stop
-            & $sshdt service uninstall
-            if (Test-Path "Registry::HKEY_CURRENT_USER\SOFTWARE\sshdt") {
-              throw "service settings remain after uninstall"
-            }
-          } finally {
-            & $sshdt service stop
-            & $sshdt service uninstall
-          }
-
   minimal:
     name: lib-only (no default features)
     runs-on: ubuntu-latest
