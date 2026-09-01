@@ -1509,9 +1509,9 @@ dependencies = [
 
 [[package]]
 name = "rmux-os"
-version = "0.7.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee3c1e9911840250a949970d7fc117cfba5df9f34f99dd820e143eb534889d7"
+checksum = "2d7017db3e6cfb59857df098ece53d22e31bdf8cd10c63dadb50ae1a140e1ce2"
 dependencies = [
  "libc",
  "rmux-types",
@@ -1521,10 +1521,11 @@ dependencies = [
 
 [[package]]
 name = "rmux-pty"
-version = "0.7.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a545dd92b71163978628b089a9d50e858074ff7fbf2c0797e2d9a99d09ce1d4e"
+checksum = "181760f14a947932b57e1cfa317d6181b7930c43d8f8b2c6ef5363ccd15d4e3e"
 dependencies = [
+ "getrandom 0.3.4",
  "libc",
  "rmux-os",
  "rmux-types",
@@ -1535,9 +1536,9 @@ dependencies = [
 
 [[package]]
 name = "rmux-types"
-version = "0.7.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eda0467ba8e83b71ce8ea6760c6166b5fa66abd3fcae7921ad628d6e48929fe9"
+checksum = "3c591db0342827ab26e271262d3ecad75c72b6299e865ee45b2a15d9db85f3db"
 
 [[package]]
 name = "rsa"

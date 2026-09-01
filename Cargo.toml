@@ -55,7 +55,7 @@ tokio-util = { version = "0.7", features = ["compat"] }
 futures-util = "0.3"
 
 # --- PTY (ADR 0006/0009): same crate rmux uses; ConPTY on Windows ---
-rmux-pty = "0.7"
+rmux-pty = "0.10"
 
 # --- observability: lib only emits events (ADR 0003) ---
 tracing = "0.1"
