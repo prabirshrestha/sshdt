@@ -122,7 +122,7 @@ jobs:
         run: |
           $sshdt = Resolve-Path "target/debug/sshdt.exe"
           try {
-            & $sshdt --port 32222 service install
+            & $sshdt --port 32222 service enable
             & $sshdt service start
             $status = & $sshdt service status
             if ($status -notmatch "enabled; process is running") {
@@ -130,13 +130,21 @@ jobs:
             }
             & $sshdt service logs | Select-String -SimpleMatch "sshdt is ready"
             & $sshdt service restart
+            & $sshdt service disable
+            $status = & $sshdt service status
+            if ($status -notmatch "disabled; process is running") {
+              throw "unexpected disabled running status: $status"
+            }
             & $sshdt service stop
             $status = & $sshdt service status
-            if ($status -notmatch "enabled; process is stopped") {
+            if ($status -notmatch "disabled; process is stopped") {
               throw "unexpected stopped status: $status"
             }
+            & $sshdt service start
+            & $sshdt service stop
           } finally {
-            & $sshdt service uninstall
+            & $sshdt service stop
+            & $sshdt service disable
           }
 
   minimal:

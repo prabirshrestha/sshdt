@@ -47,13 +47,13 @@ Requires the toolchain pinned in `rust-toolchain.toml` (latest stable; edition 2
 On Windows, sshdt can register itself to start when the current user signs in:
 
 ```powershell
-sshdt service install
+sshdt service enable
 sshdt service start
 sshdt service status
 sshdt service restart
 sshdt service logs --follow
 sshdt service stop
-sshdt service uninstall
+sshdt service disable
 ```
 
 Store sshdt server settings in `%USERPROFILE%\.ssh\sshdt_config`, beside the
@@ -66,25 +66,27 @@ Port 2222
 AuthorizedKeysFile C:\Users\me\.ssh\authorized_keys
 ```
 
-Install the config and start the process:
+Enable launch at login and start the process:
 
 ```powershell
-sshdt service install
+sshdt service enable
 sshdt service start
 ```
 
 After you edit the config, run `sshdt service restart` to apply the changes.
 Use `127.0.0.1` instead of `0.0.0.0` if only local clients must connect.
 
-`service install` saves the server options that appear before `service`. Relative
+`service enable` saves the server options that appear before `service`. Relative
 file and directory paths are converted to absolute paths. Run the command again
-to replace the saved options. `start`, `stop`, and `restart` control the installed
-process without changing whether it starts at login. `status` reports both states.
+to replace the saved options. `enable` and `disable` control launch at login.
+They do not change the running process. `start`, `stop`, and `restart` control
+the process without changing whether it starts at login. `status` reports both
+states. A disabled process can still be started manually.
 
 By default, the service writes daily rotating logs to `%USERPROFILE%\.sshdt\logs`
 and keeps up to seven files. `service logs` prints the current log. Add
 `--follow` or `-f` to continue printing new entries across log rotation. If
-`--log-file` was set during installation, these commands use that file instead.
+`--log-file` was set during `service enable`, these commands use that file instead.
 
 If `--config` is not set, sshdt automatically loads
 `%USERPROFILE%\.ssh\sshdt_config` when that file exists. If it does not exist,
@@ -94,13 +96,13 @@ authentication, and the default Windows shell. Use `--no-config` to skip the
 automatic config file:
 
 ```powershell
-sshdt --no-config service install
+sshdt --no-config service enable
 ```
 
 This uses the current user's Windows `Run` registry entry, like AI Proxy's
 **Launch at login** setting. It needs no administrator rights and runs sshdt as
 the signed-in user. It is not a Windows Service Control Manager service, and it
-does not start before user sign-in. Service installation is not supported on
+does not start before user sign-in. Service management is not supported on
 macOS or Linux yet.
 
 ## Quick start
@@ -254,12 +256,12 @@ sshdt [OPTIONS] [<command>]
       --version / --help
 
 Commands:
-  service install                Launch sshdt at login for the current Windows user
-  service uninstall              Remove sshdt from launch at login
+  service enable                 Enable sshdt at login for the current Windows user
+  service disable                Disable sshdt at login without stopping it
   service status                 Show launch-at-login and process state
-  service start                  Start the installed sshdt process
+  service start                  Start the configured sshdt process
   service stop                   Stop the running sshdt process
-  service restart                Restart the installed sshdt process
+  service restart                Restart the configured sshdt process
   service logs [-f|--follow]     Print or follow the rotating service log
 ```
 

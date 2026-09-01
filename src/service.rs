@@ -5,8 +5,8 @@ use std::path::PathBuf;
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy)]
 pub(crate) enum Action {
-    Install,
-    Uninstall,
+    Enable,
+    Disable,
     Status,
     Start,
     Stop,
@@ -155,23 +155,22 @@ mod windows {
 
     pub(super) fn manage(action: Action, startup_args: &[String]) -> anyhow::Result<()> {
         match action {
-            Action::Install => {
-                install(startup_args)?;
-                println!("installed sshdt launch at login for the current Windows user");
+            Action::Enable => {
+                enable(startup_args)?;
+                println!("enabled sshdt launch at login for the current Windows user");
                 println!("run `sshdt service start` to start it now");
             }
-            Action::Uninstall => {
-                stop(false)?;
-                uninstall()?;
-                println!("removed sshdt launch at login for the current Windows user");
+            Action::Disable => {
+                disable()?;
+                println!("disabled sshdt launch at login for the current Windows user");
             }
             Action::Status => {
                 println!(
                     "sshdt launch at login is {}; process is {}",
-                    if is_registered()? {
-                        if is_enabled()? { "enabled" } else { "disabled" }
+                    if launch_at_login_enabled()? {
+                        "enabled"
                     } else {
-                        "not installed"
+                        "disabled"
                     },
                     if is_running()? { "running" } else { "stopped" }
                 );
@@ -187,7 +186,7 @@ mod windows {
         Ok(())
     }
 
-    fn install(startup_args: &[String]) -> anyhow::Result<()> {
+    fn enable(startup_args: &[String]) -> anyhow::Result<()> {
         let executable = current_executable()?;
         let mut command = launch_app_path(&executable);
         for argument in startup_args {
@@ -211,7 +210,7 @@ mod windows {
         CURRENT_USER
             .create(RUN_KEY)
             .and_then(|key| key.set_string(APP_NAME, command))
-            .context("failed to install sshdt launch at login")?;
+            .context("failed to enable sshdt launch at login")?;
 
         match CURRENT_USER.options().write().open(STARTUP_APPROVED_KEY) {
             Ok(key) => key
@@ -223,18 +222,8 @@ mod windows {
         Ok(())
     }
 
-    fn uninstall() -> anyhow::Result<()> {
-        remove_value(RUN_KEY, APP_NAME, "failed to remove sshdt launch at login")?;
-        remove_value(
-            SETTINGS_KEY,
-            ARGS_VALUE,
-            "failed to remove sshdt service options",
-        )?;
-        remove_value(
-            SETTINGS_KEY,
-            EXECUTABLE_VALUE,
-            "failed to remove the sshdt service executable",
-        )
+    fn disable() -> anyhow::Result<()> {
+        remove_value(RUN_KEY, APP_NAME, "failed to disable sshdt launch at login")
     }
 
     fn remove_value(key: &str, value: &str, context: &'static str) -> anyhow::Result<()> {
@@ -252,8 +241,8 @@ mod windows {
 
     fn start() -> anyhow::Result<()> {
         ensure!(
-            is_registered()?,
-            "sshdt is not installed; run `sshdt service install` first"
+            is_configured()?,
+            "sshdt is not configured; run `sshdt service enable` first"
         );
         if is_running()? {
             println!("sshdt is already running");
@@ -313,7 +302,7 @@ mod windows {
     }
 
     fn saved_args() -> anyhow::Result<Vec<String>> {
-        try_saved_args()?.ok_or_else(|| anyhow::anyhow!("sshdt service options are not installed"))
+        try_saved_args()?.ok_or_else(|| anyhow::anyhow!("sshdt service options are not configured"))
     }
 
     fn try_saved_args() -> anyhow::Result<Option<Vec<String>>> {
@@ -327,7 +316,7 @@ mod windows {
                     .collect(),
             )),
             Err(error) if error.code() == FILE_NOT_FOUND => Ok(None),
-            Err(error) => Err(error).context("failed to read installed sshdt service options"),
+            Err(error) => Err(error).context("failed to read configured sshdt service options"),
         }
     }
 
@@ -336,21 +325,21 @@ mod windows {
             .open(SETTINGS_KEY)
             .and_then(|key| key.get_string(EXECUTABLE_VALUE))
             .map(PathBuf::from)
-            .context("failed to read the installed sshdt executable")
+            .context("failed to read the configured sshdt executable")
     }
 
-    fn is_registered() -> anyhow::Result<bool> {
+    fn has_run_entry() -> anyhow::Result<bool> {
         match CURRENT_USER
             .open(RUN_KEY)
             .and_then(|key| key.get_string(APP_NAME))
         {
             Ok(_) => Ok(true),
             Err(error) if error.code() == FILE_NOT_FOUND => Ok(false),
-            Err(error) => Err(error).context("failed to read sshdt launch-at-login registration"),
+            Err(error) => Err(error).context("failed to read sshdt launch-at-login state"),
         }
     }
 
-    fn is_enabled() -> anyhow::Result<bool> {
+    fn startup_approved() -> anyhow::Result<bool> {
         match CURRENT_USER
             .open(STARTUP_APPROVED_KEY)
             .and_then(|key| key.get_value(APP_NAME))
@@ -358,6 +347,24 @@ mod windows {
             Ok(value) => Ok(value.first() == Some(&STARTUP_ENABLED[0])),
             Err(error) if error.code() == FILE_NOT_FOUND => Ok(true),
             Err(error) => Err(error).context("failed to read Windows startup settings"),
+        }
+    }
+
+    fn launch_at_login_enabled() -> anyhow::Result<bool> {
+        Ok(has_run_entry()? && startup_approved()?)
+    }
+
+    fn is_configured() -> anyhow::Result<bool> {
+        let Some(_) = try_saved_args()? else {
+            return Ok(false);
+        };
+        match CURRENT_USER
+            .open(SETTINGS_KEY)
+            .and_then(|key| key.get_string(EXECUTABLE_VALUE))
+        {
+            Ok(_) => Ok(true),
+            Err(error) if error.code() == FILE_NOT_FOUND => Ok(false),
+            Err(error) => Err(error).context("failed to read sshdt service configuration"),
         }
     }
 

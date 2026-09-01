@@ -128,8 +128,8 @@ struct ServiceArgs {
 #[derive(FromArgs)]
 #[argh(subcommand)]
 enum ServiceCommand {
-    Install(InstallService),
-    Uninstall(UninstallService),
+    Enable(EnableService),
+    Disable(DisableService),
     Status(ServiceStatus),
     Start(StartService),
     Stop(StopService),
@@ -137,22 +137,22 @@ enum ServiceCommand {
     Logs(ServiceLogs),
 }
 
-/// Install sshdt as a launch-at-login program.
+/// Enable sshdt at login for the current Windows user.
 #[derive(FromArgs)]
-#[argh(subcommand, name = "install")]
-struct InstallService {}
+#[argh(subcommand, name = "enable")]
+struct EnableService {}
 
-/// Remove sshdt from launch at login.
+/// Disable sshdt at login without stopping it.
 #[derive(FromArgs)]
-#[argh(subcommand, name = "uninstall")]
-struct UninstallService {}
+#[argh(subcommand, name = "disable")]
+struct DisableService {}
 
 /// Show whether sshdt is configured to launch at login.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "status")]
 struct ServiceStatus {}
 
-/// Start the installed sshdt program now.
+/// Start the configured sshdt program now.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "start")]
 struct StartService {}
@@ -162,7 +162,7 @@ struct StartService {}
 #[argh(subcommand, name = "stop")]
 struct StopService {}
 
-/// Restart the installed sshdt program.
+/// Restart the configured sshdt program.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "restart")]
 struct RestartService {}
@@ -244,10 +244,8 @@ async fn run_server(args: &Args, _service_mode: bool) -> anyhow::Result<()> {
 
 fn manage_service(service_args: &ServiceArgs, args: &Args) -> anyhow::Result<()> {
     match &service_args.command {
-        ServiceCommand::Install(_) => {
-            service::manage(service::Action::Install, startup_args(args)?)
-        }
-        ServiceCommand::Uninstall(_) => service::manage(service::Action::Uninstall, Vec::new()),
+        ServiceCommand::Enable(_) => service::manage(service::Action::Enable, startup_args(args)?),
+        ServiceCommand::Disable(_) => service::manage(service::Action::Disable, Vec::new()),
         ServiceCommand::Status(_) => service::manage(service::Action::Status, Vec::new()),
         ServiceCommand::Start(_) => service::manage(service::Action::Start, Vec::new()),
         ServiceCommand::Stop(_) => service::manage(service::Action::Stop, Vec::new()),
@@ -486,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn service_install_preserves_server_options() {
+    fn service_enable_preserves_server_options() {
         let args = parse(&[
             "--port",
             "2200",
@@ -498,12 +496,12 @@ mod tests {
             "Ada Lovelace",
             "--no-forward",
             "service",
-            "install",
+            "enable",
         ]);
         assert!(matches!(
             args.command,
             Some(Command::Service(ref service))
-                if matches!(service.command, ServiceCommand::Install(_))
+                if matches!(service.command, ServiceCommand::Enable(_))
         ));
         assert_eq!(
             startup_args(&args).unwrap(),
@@ -522,8 +520,8 @@ mod tests {
     }
 
     #[test]
-    fn service_install_does_not_save_the_implicit_config_path() {
-        let args = parse(&["service", "install"]);
+    fn service_enable_does_not_save_the_implicit_config_path() {
+        let args = parse(&["service", "enable"]);
         assert!(startup_args(&args).unwrap().is_empty());
     }
 
@@ -566,8 +564,8 @@ mod tests {
     }
 
     #[test]
-    fn service_install_preserves_no_config() {
-        let args = parse(&["--no-config", "service", "install"]);
+    fn service_enable_preserves_no_config() {
+        let args = parse(&["--no-config", "service", "enable"]);
         assert_eq!(startup_args(&args).unwrap(), ["--no-config"]);
     }
 
@@ -593,8 +591,8 @@ mod tests {
     #[test]
     fn service_commands_parse() {
         for (name, expected) in [
-            ("install", "install"),
-            ("uninstall", "uninstall"),
+            ("enable", "enable"),
+            ("disable", "disable"),
             ("status", "status"),
             ("start", "start"),
             ("stop", "stop"),
@@ -606,8 +604,8 @@ mod tests {
                 panic!("expected service command");
             };
             let actual = match service.command {
-                ServiceCommand::Install(_) => "install",
-                ServiceCommand::Uninstall(_) => "uninstall",
+                ServiceCommand::Enable(_) => "enable",
+                ServiceCommand::Disable(_) => "disable",
                 ServiceCommand::Status(_) => "status",
                 ServiceCommand::Start(_) => "start",
                 ServiceCommand::Stop(_) => "stop",
