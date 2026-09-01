@@ -237,7 +237,7 @@ async fn run_server(args: &Args, _service_mode: bool) -> anyhow::Result<()> {
     }
     .await;
     if service_mode && let Err(error) = &result {
-        tracing::error!(error = %error, "sshdt service stopped with an error");
+        tracing::error!(error = ?error, "sshdt service stopped with an error");
     }
     result
 }
