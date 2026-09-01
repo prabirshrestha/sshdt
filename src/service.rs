@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub(crate) enum Action {
     Enable,
     Disable,
+    Uninstall,
     Status,
     Start,
     Stop,
@@ -164,6 +165,10 @@ mod windows {
                 disable()?;
                 println!("disabled sshdt launch at login for the current Windows user");
             }
+            Action::Uninstall => {
+                uninstall()?;
+                println!("uninstalled sshdt launch-at-login settings for the current Windows user");
+            }
             Action::Status => {
                 println!(
                     "sshdt launch at login is {}; process is {}",
@@ -224,6 +229,21 @@ mod windows {
 
     fn disable() -> anyhow::Result<()> {
         remove_value(RUN_KEY, APP_NAME, "failed to disable sshdt launch at login")
+    }
+
+    fn uninstall() -> anyhow::Result<()> {
+        stop(false)?;
+        disable()?;
+        remove_value(
+            STARTUP_APPROVED_KEY,
+            APP_NAME,
+            "failed to remove sshdt from Windows startup settings",
+        )?;
+        match CURRENT_USER.remove_tree(SETTINGS_KEY) {
+            Ok(()) => Ok(()),
+            Err(error) if error.code() == FILE_NOT_FOUND => Ok(()),
+            Err(error) => Err(error).context("failed to remove sshdt service settings"),
+        }
     }
 
     fn remove_value(key: &str, value: &str, context: &'static str) -> anyhow::Result<()> {

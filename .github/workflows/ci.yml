@@ -142,9 +142,13 @@ jobs:
             }
             & $sshdt service start
             & $sshdt service stop
+            & $sshdt service uninstall
+            if (Test-Path "Registry::HKEY_CURRENT_USER\SOFTWARE\sshdt") {
+              throw "service settings remain after uninstall"
+            }
           } finally {
             & $sshdt service stop
-            & $sshdt service disable
+            & $sshdt service uninstall
           }
 
   minimal:

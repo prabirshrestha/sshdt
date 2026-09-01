@@ -130,6 +130,7 @@ struct ServiceArgs {
 enum ServiceCommand {
     Enable(EnableService),
     Disable(DisableService),
+    Uninstall(UninstallService),
     Status(ServiceStatus),
     Start(StartService),
     Stop(StopService),
@@ -146,6 +147,11 @@ struct EnableService {}
 #[derive(FromArgs)]
 #[argh(subcommand, name = "disable")]
 struct DisableService {}
+
+/// Stop sshdt and remove its saved launch-at-login settings.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "uninstall")]
+struct UninstallService {}
 
 /// Show whether sshdt is configured to launch at login.
 #[derive(FromArgs)]
@@ -246,6 +252,7 @@ fn manage_service(service_args: &ServiceArgs, args: &Args) -> anyhow::Result<()>
     match &service_args.command {
         ServiceCommand::Enable(_) => service::manage(service::Action::Enable, startup_args(args)?),
         ServiceCommand::Disable(_) => service::manage(service::Action::Disable, Vec::new()),
+        ServiceCommand::Uninstall(_) => service::manage(service::Action::Uninstall, Vec::new()),
         ServiceCommand::Status(_) => service::manage(service::Action::Status, Vec::new()),
         ServiceCommand::Start(_) => service::manage(service::Action::Start, Vec::new()),
         ServiceCommand::Stop(_) => service::manage(service::Action::Stop, Vec::new()),
@@ -593,6 +600,7 @@ mod tests {
         for (name, expected) in [
             ("enable", "enable"),
             ("disable", "disable"),
+            ("uninstall", "uninstall"),
             ("status", "status"),
             ("start", "start"),
             ("stop", "stop"),
@@ -606,6 +614,7 @@ mod tests {
             let actual = match service.command {
                 ServiceCommand::Enable(_) => "enable",
                 ServiceCommand::Disable(_) => "disable",
+                ServiceCommand::Uninstall(_) => "uninstall",
                 ServiceCommand::Status(_) => "status",
                 ServiceCommand::Start(_) => "start",
                 ServiceCommand::Stop(_) => "stop",

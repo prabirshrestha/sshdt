@@ -54,6 +54,7 @@ sshdt service restart
 sshdt service logs --follow
 sshdt service stop
 sshdt service disable
+sshdt service uninstall
 ```
 
 Store sshdt server settings in `%USERPROFILE%\.ssh\sshdt_config`, beside the
@@ -82,6 +83,10 @@ to replace the saved options. `enable` and `disable` control launch at login.
 They do not change the running process. `start`, `stop`, and `restart` control
 the process without changing whether it starts at login. `status` reports both
 states. A disabled process can still be started manually.
+
+`service uninstall` stops sshdt and removes its launch-at-login entry and saved
+service options. It does not delete the sshdt executable, `sshdt_config`, host
+keys, or logs.
 
 By default, the service writes daily rotating logs to `%USERPROFILE%\.sshdt\logs`
 and keeps up to seven files. `service logs` prints the current log. Add
@@ -258,6 +263,7 @@ sshdt [OPTIONS] [<command>]
 Commands:
   service enable                 Enable sshdt at login for the current Windows user
   service disable                Disable sshdt at login without stopping it
+  service uninstall              Stop sshdt and remove its saved service settings
   service status                 Show launch-at-login and process state
   service start                  Start the configured sshdt process
   service stop                   Stop the running sshdt process
