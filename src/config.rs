@@ -56,6 +56,11 @@ pub struct Config {
     /// `"ssh-ed25519 AAAA... comment"` (repeatable).
     pub authorized_key_lines: Vec<String>,
 
+    /// Whether anonymous (`none`) authentication is allowed when no password
+    /// or public key is configured. Defaults to `true`; an sshd-style
+    /// authentication directive disables this fallback.
+    pub allow_anonymous: bool,
+
     /// The interactive session command line (e.g. `"rmux new-session -A"`).
     /// When `None`, an OS-aware default is used: `$SHELL` (else `/bin/sh`) on
     /// Unix; `pwsh` → `powershell` → `cmd` on Windows (ADR 0011).
@@ -107,6 +112,7 @@ impl Default for Config {
             password: None,
             authorized_keys: Vec::new(),
             authorized_key_lines: Vec::new(),
+            allow_anonymous: true,
             shell: None,
             sftp_root: None,
             allow_tcp_forwarding: true,
@@ -144,7 +150,8 @@ impl Config {
         if path.extension().and_then(|s| s.to_str()) == Some("toml") {
             Self::from_toml(&content).map_err(with_path)
         } else {
-            crate::sshd_config::parse(&content).map_err(with_path)
+            crate::sshd_config::parse_for_user(&content, dirs::home_dir().as_deref())
+                .map_err(with_path)
         }
     }
 
@@ -165,8 +172,8 @@ impl Config {
 
     /// Returns whether any explicit authentication method is configured.
     ///
-    /// When this is `false`, the server accepts anonymous (`none`) auth
-    /// (ADR 0013).
+    /// When this and [`allow_anonymous`](Self::allow_anonymous) are both false,
+    /// the server rejects all built-in authentication (ADR 0013).
     pub fn has_explicit_auth(&self) -> bool {
         self.password.is_some()
             || !self.authorized_keys.is_empty()

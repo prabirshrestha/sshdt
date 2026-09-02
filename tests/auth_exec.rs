@@ -11,6 +11,7 @@ use common::{builder, connect, gen_keypair, public_line};
 #[cfg(unix)]
 use common::exec;
 use russh::keys::PrivateKeyWithHashAlg;
+use sshdt::{Config, Server};
 
 #[derive(Default)]
 struct ChannelLifecycle {
@@ -58,6 +59,23 @@ async fn anonymous_auth_accepts_by_default() {
     let server = b.build().unwrap();
     let mut handle = connect(server).await;
     assert!(handle.authenticate_none("anyone").await.unwrap().success());
+}
+
+#[tokio::test]
+async fn explicit_authentication_disable_rejects_anonymous() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("sshdt_config");
+    std::fs::write(
+        &config_path,
+        format!(
+            "HostKey {}\nPasswordAuthentication no\nPubkeyAuthentication no\n",
+            dir.path().join("host_ed25519").display()
+        ),
+    )
+    .unwrap();
+    let server = Server::from_config(Config::load_file(&config_path).unwrap()).unwrap();
+    let mut handle = connect(server).await;
+    assert!(!handle.authenticate_none("anyone").await.unwrap().success());
 }
 
 #[tokio::test]

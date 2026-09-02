@@ -291,6 +291,13 @@ impl ServerBuilder {
         self
     }
 
+    /// Set whether a server without configured credentials accepts anonymous
+    /// (`none`) authentication.
+    pub fn allow_anonymous(mut self, allow: bool) -> Self {
+        self.config.allow_anonymous = allow;
+        self
+    }
+
     /// Set the interactive session command line.
     pub fn shell(mut self, command_line: impl Into<String>) -> Self {
         self.config.shell = Some(command_line.into());
