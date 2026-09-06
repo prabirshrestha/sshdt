@@ -108,6 +108,9 @@ struct Args {
     /// explicit Dev Tunnels ID
     #[argh(option)]
     devtunnel_id: Option<String>,
+    /// optional Dev Tunnels executable path
+    #[argh(option)]
+    devtunnel_bin: Option<PathBuf>,
     /// create the configured tunnel and SSH port if missing
     #[argh(switch)]
     devtunnel_auto_create: bool,
@@ -411,6 +414,9 @@ fn startup_args(args: &Args) -> anyhow::Result<Vec<String>> {
     push_switch(&mut result, "--devtunnel-enable", args.devtunnel_enable);
     push_switch(&mut result, "--devtunnel-disable", args.devtunnel_disable);
     push_option(&mut result, "--devtunnel-id", args.devtunnel_id.as_deref());
+    if let Some(path) = &args.devtunnel_bin {
+        push_path_option(&mut result, "--devtunnel-bin", path)?;
+    }
     push_switch(
         &mut result,
         "--devtunnel-auto-create",
@@ -562,6 +568,9 @@ fn build_config(args: &Args) -> anyhow::Result<Config> {
     if let Some(id) = &args.devtunnel_id {
         config.dev_tunnel.id = Some(id.clone());
     }
+    if let Some(bin) = &args.devtunnel_bin {
+        config.dev_tunnel.bin = Some(bin.clone());
+    }
     if args.devtunnel_auto_create {
         config.dev_tunnel.auto_create = true;
     }
@@ -664,6 +673,8 @@ mod tests {
             "--devtunnel-id",
             "my-tunnel",
             "--devtunnel-auto-create",
+            "--devtunnel-bin",
+            r"C:\Program Files\Dev Tunnels\devtunnel.exe",
             "--devtunnel-timeout",
             "45s",
             "service",
@@ -675,6 +686,14 @@ mod tests {
         assert!(config.dev_tunnel.auto_create);
         assert_eq!(config.dev_tunnel.id.as_deref(), Some("my-tunnel"));
         assert_eq!(config.dev_tunnel.timeout_secs, 45);
+        assert_eq!(
+            config.dev_tunnel.bin,
+            Some(
+                std::env::current_dir()
+                    .unwrap()
+                    .join(r"C:\Program Files\Dev Tunnels\devtunnel.exe")
+            )
+        );
     }
 
     #[test]
@@ -683,7 +702,7 @@ mod tests {
         let path = directory.path().join("sshdt_config");
         std::fs::write(
             &path,
-            "DevTunnelEnable yes\nDevTunnelId old-tunnel\nDevTunnelTimeout 30s\n",
+            "DevTunnelEnable yes\nDevTunnelId old-tunnel\nDevTunnelTimeout 30s\nDevTunnelBin old-devtunnel\n",
         )
         .unwrap();
         let args = parse(&[
@@ -692,6 +711,8 @@ mod tests {
             "--devtunnel-disable",
             "--devtunnel-id",
             "new-tunnel",
+            "--devtunnel-bin",
+            "new-devtunnel",
             "--devtunnel-timeout",
             "2m",
         ]);
@@ -699,6 +720,10 @@ mod tests {
         assert!(!config.dev_tunnel.enabled);
         assert_eq!(config.dev_tunnel.id.as_deref(), Some("new-tunnel"));
         assert_eq!(config.dev_tunnel.timeout_secs, 120);
+        assert_eq!(
+            config.dev_tunnel.bin,
+            Some(std::path::PathBuf::from("new-devtunnel"))
+        );
         assert!(
             super::build_config(&parse(&[
                 "--no-config",

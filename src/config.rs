@@ -29,6 +29,8 @@ pub struct DevTunnelConfig {
     pub enabled: bool,
     /// Explicit bare or region-qualified tunnel ID.
     pub id: Option<String>,
+    /// Optional Dev Tunnels executable path for hosting.
+    pub bin: Option<PathBuf>,
     /// Create a missing tunnel and port when enabled.
     pub auto_create: bool,
     /// Maximum time allowed for one setup attempt, in seconds.
@@ -40,6 +42,7 @@ impl Default for DevTunnelConfig {
         Self {
             enabled: false,
             id: None,
+            bin: None,
             auto_create: false,
             timeout_secs: 30,
         }

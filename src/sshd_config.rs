@@ -106,6 +106,12 @@ pub fn parse(input: &str) -> Result<Config> {
                 config.dev_tunnel.enabled =
                     parse_yes_no(value).ok_or_else(|| invalid(&ctx(), "DevTunnelEnable", value))?;
             }
+            "devtunnelbin" => {
+                if value.is_empty() {
+                    return Err(invalid(&ctx(), "DevTunnelBin", value));
+                }
+                config.dev_tunnel.bin = Some(PathBuf::from(value));
+            }
             "devtunnelid" => {
                 if !crate::valid_tunnel_id(value) {
                     return Err(invalid(&ctx(), "DevTunnelId", value));
@@ -274,6 +280,19 @@ mod tests {
         ] {
             assert!(parse(line).is_err(), "{line}");
         }
+    }
+
+    #[test]
+    fn dev_tunnel_bin_preserves_windows_paths_and_spaces() {
+        let config =
+            parse(r"DevTunnelBin C:\Program Files\Dev Tunnels\devtunnel.exe # optional").unwrap();
+        assert_eq!(
+            config.dev_tunnel.bin,
+            Some(PathBuf::from(r"C:\Program Files\Dev Tunnels\devtunnel.exe"))
+        );
+        assert!(parse("DevTunnelBin # missing path").is_err());
+        let decoded = crate::Config::from_toml(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(decoded.dev_tunnel.bin, config.dev_tunnel.bin);
     }
 
     #[test]

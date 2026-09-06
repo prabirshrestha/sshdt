@@ -306,7 +306,7 @@ pub async fn broker(tunnel: String) -> Result<()> {
             }
             _ = tokio::time::sleep_until(retry_at), if connector.is_none() && !requested.is_empty() => {
                 if connector.is_none() {
-                    match process::spawn_owned(&["connect".into(), tunnel.clone()]).await {
+                    match process::spawn_owned(&["connect".into(), tunnel.clone()], None).await {
                         Ok(process) => connector = Some(process),
                         Err(_) => { forward_tx.send_modify(|state| state.error = Some("cannot start devtunnel; check installation and login".into())); break; }
                     }

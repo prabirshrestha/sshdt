@@ -227,9 +227,15 @@ struct Output {
     stderr: String,
 }
 
-async fn command(args: &[&str], deadline: Instant, log: &Log, json_output: bool) -> Result<Output> {
+async fn command(
+    config: &DevTunnelConfig,
+    args: &[&str],
+    deadline: Instant,
+    log: &Log,
+    json_output: bool,
+) -> Result<Output> {
     let args = args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-    let mut child = spawn_owned(&args).await?;
+    let mut child = spawn_owned(&args, config.bin.as_deref()).await?;
     let result = timeout_at(deadline, async {
         let mut stdout = String::new();
         let mut stderr = String::new();
@@ -310,7 +316,7 @@ fn has_port(value: &Value, port: u16) -> bool {
 async fn attempt(config: &DevTunnelConfig, port: u16, log: &Log) -> Result<OwnedProcess> {
     let id = config.id.as_deref().unwrap();
     let deadline = Instant::now() + Duration::from_secs(config.timeout_secs);
-    let user = command(&["user", "show", "--json"], deadline, log, true).await?;
+    let user = command(config, &["user", "show", "--json"], deadline, log, true).await?;
     if !user.success {
         bail!("{}", failure(&user));
     }
@@ -319,12 +325,12 @@ async fn attempt(config: &DevTunnelConfig, port: u16, log: &Log) -> Result<Owned
     if account.get("status").and_then(Value::as_str) != Some("Logged in") {
         bail!("login required; run devtunnel user login under the SSH server account");
     }
-    let mut shown = command(&["show", id, "--json"], deadline, log, true).await?;
+    let mut shown = command(config, &["show", id, "--json"], deadline, log, true).await?;
     if !shown.success {
         if !not_found(&shown) || !config.auto_create {
             bail!("{}", failure(&shown));
         }
-        let created = command(&["create", id, "--json"], deadline, log, true).await?;
+        let created = command(config, &["create", id, "--json"], deadline, log, true).await?;
         if !created.success {
             log.write(
                 "create",
@@ -332,7 +338,7 @@ async fn attempt(config: &DevTunnelConfig, port: u16, log: &Log) -> Result<Owned
                 "creation failed; checking for a concurrent creator",
             );
         }
-        shown = command(&["show", id, "--json"], deadline, log, true).await?;
+        shown = command(config, &["show", id, "--json"], deadline, log, true).await?;
     }
     if !shown.success {
         bail!("{}", failure(&shown));
@@ -360,6 +366,7 @@ async fn attempt(config: &DevTunnelConfig, port: u16, log: &Log) -> Result<Owned
         }
         let number = port.to_string();
         let created = command(
+            config,
             &[
                 "port",
                 "create",
@@ -382,7 +389,7 @@ async fn attempt(config: &DevTunnelConfig, port: u16, log: &Log) -> Result<Owned
                 "port creation failed; checking current configuration",
             );
         }
-        shown = command(&["show", id, "--json"], deadline, log, true).await?;
+        shown = command(config, &["show", id, "--json"], deadline, log, true).await?;
         if !shown.success {
             bail!("{}", failure(&shown));
         }
@@ -391,7 +398,7 @@ async fn attempt(config: &DevTunnelConfig, port: u16, log: &Log) -> Result<Owned
             bail!("tunnel port {port} is missing or has an incompatible protocol");
         }
     }
-    let mut child = spawn_owned(&["host".into(), id.into()]).await?;
+    let mut child = spawn_owned(&["host".into(), id.into()], config.bin.as_deref()).await?;
     let ready = timeout_at(deadline, async {
         while let Some(event) = child.next_event().await {
             match event {

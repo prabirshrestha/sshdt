@@ -19,7 +19,10 @@ pub struct OwnedProcess {
     exited: bool,
 }
 
-pub async fn spawn_owned(argv: &[String]) -> Result<OwnedProcess> {
+pub async fn spawn_owned(
+    argv: &[String],
+    binary: Option<&std::path::Path>,
+) -> Result<OwnedProcess> {
     let mut command = Command::new(std::env::current_exe()?);
     command
         .arg("devtunnel-guardian")
@@ -27,6 +30,9 @@ pub async fn spawn_owned(argv: &[String]) -> Result<OwnedProcess> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(binary) = binary {
+        command.env("SSHDT_DEVTUNNEL_BIN", binary);
+    }
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]

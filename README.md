@@ -125,6 +125,9 @@ Port 22
 # DevTunnelEnable defaults to no.
 DevTunnelEnable yes
 
+# Optional executable path. Otherwise use SSHDT_DEVTUNNEL_BIN or PATH.
+# DevTunnelBin C:\tools\devtunnel.exe
+
 # Set your own tunnel ID. sshdt does not derive it from the hostname
 # or append a region. The CLI can resolve a bare ID such as sshdt-machine1.
 # Use a dedicated tunnel because devtunnel host hosts all configured ports.
@@ -148,6 +151,7 @@ The equivalent server options are:
 sshdt --port 22 --devtunnel-enable --devtunnel-id sshdt-machine1 --devtunnel-auto-create --devtunnel-timeout 30s
 ```
 
+Use `--devtunnel-bin /path/to/devtunnel` to override `DevTunnelBin`.
 Use `--devtunnel-disable` to override an enabled config. Server options before
 `service enable` are saved with the launch-at-login settings.
 
