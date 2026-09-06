@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use russh::keys::ssh_key::PublicKey;
-use russh::server::{Auth, Handler, Msg, Session};
-use russh::{Channel, ChannelId, Pty};
+use russh::server::{Auth, ChannelOpenHandle, Handler, Msg, Session};
+use russh::{Channel, ChannelId, ChannelOpenFailure, Pty};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::mpsc;
 
@@ -231,8 +231,9 @@ impl Handler for ConnectionHandler {
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         let id = channel.id();
         tracing::debug!(?id, "session channel opened");
         self.channels.insert(
@@ -242,7 +243,8 @@ impl Handler for ConnectionHandler {
                 ..Default::default()
             },
         );
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 
     async fn pty_request(
@@ -361,11 +363,15 @@ impl Handler for ConnectionHandler {
         port_to_connect: u32,
         originator_address: &str,
         originator_port: u32,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         if !self.inner.allow_tcp_forwarding {
             tracing::debug!("direct-tcpip denied (forwarding disabled)");
-            return Ok(false);
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
         }
         let request = ForwardRequest {
             host: host_to_connect.to_string(),
@@ -377,14 +383,18 @@ impl Handler for ConnectionHandler {
             && forwarder.authorize(&request) == ForwardDecision::Deny
         {
             tracing::debug!(host = %request.host, port = request.port, "direct-tcpip denied by policy");
-            return Ok(false);
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
         }
+        reply.accept().await;
         tokio::spawn(crate::forward::run_direct_tcpip(
             channel,
             request.host,
             request.port,
         ));
-        Ok(true)
+        Ok(())
     }
 
     async fn channel_eof(

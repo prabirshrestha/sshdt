@@ -3,7 +3,7 @@ use super::{
     process::{OwnedProcess, ProcessEvent, spawn_owned},
 };
 use anyhow::{Context, Result, bail};
-use fs4::fs_std::FileExt;
+use fs4::{FileExt, TryLockError};
 use serde_json::{Value, json};
 use sshdt::DevTunnelConfig;
 use std::fs::{self, OpenOptions};
@@ -47,7 +47,7 @@ pub fn start(config: DevTunnelConfig, addr: SocketAddr) -> HostHandle {
                 return;
             }
         };
-        if !matches!(instance_lock.try_lock_exclusive(), Ok(true)) {
+        if FileExt::try_lock(&instance_lock).is_err() {
             tracing::warn!("Dev Tunnel status lock already held");
             return;
         }
@@ -99,7 +99,7 @@ pub fn start(config: DevTunnelConfig, addr: SocketAddr) -> HostHandle {
                 return;
             }
         };
-        if !matches!(lock.try_lock_exclusive(), Ok(true)) {
+        if FileExt::try_lock(&lock).is_err() {
             status(
                 &log,
                 Some(id),
@@ -453,7 +453,7 @@ pub fn print_status() -> Result<()> {
             Ok(lock) => lock,
             Err(_) => continue,
         };
-        if matches!(lock.try_lock_exclusive(), Ok(false)) {
+        if matches!(FileExt::try_lock(&lock), Err(TryLockError::WouldBlock)) {
             println!(
                 "Dev Tunnel {}: {} ({})",
                 value["id"].as_str().unwrap_or("not configured"),

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use fs4::fs_std::FileExt;
+use fs4::FileExt;
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -49,7 +49,7 @@ impl Log {
             .read(true)
             .write(true)
             .open(dir.join(format!("{}.lock", self.prefix)))?;
-        lock.lock_exclusive()?;
+        FileExt::lock(&lock)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();

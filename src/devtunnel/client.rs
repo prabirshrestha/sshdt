@@ -4,7 +4,7 @@ use super::{
     process::{self, ProcessEvent},
 };
 use anyhow::{Context, Result, bail, ensure};
-use fs4::fs_std::FileExt;
+use fs4::{FileExt, TryLockError};
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
@@ -158,11 +158,13 @@ async fn acquire(request: &ProxyRequest) -> Result<TcpStream> {
 }
 
 fn broker_lock_held(lock: &std::fs::File) -> Result<bool> {
-    if lock.try_lock_exclusive()? {
-        FileExt::unlock(lock)?;
-        Ok(false)
-    } else {
-        Ok(true)
+    match FileExt::try_lock(lock) {
+        Ok(()) => {
+            FileExt::unlock(lock)?;
+            Ok(false)
+        }
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(error)) => Err(error.into()),
     }
 }
 
@@ -256,8 +258,10 @@ pub async fn broker(tunnel: String) -> Result<()> {
         .write(true)
         .open(&lock_path)?;
     ipc::secure(&lock_path)?;
-    if !lock.try_lock_exclusive()? {
-        return Ok(());
+    match FileExt::try_lock(&lock) {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Ok(()),
+        Err(TryLockError::Error(error)) => return Err(error.into()),
     }
     let log = Log::new("client")?;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
@@ -649,7 +653,10 @@ mod tests {
             .write(true)
             .open(path)
             .unwrap();
-        assert!(!file.try_lock_exclusive().unwrap());
+        assert!(matches!(
+            FileExt::try_lock(&file),
+            Err(TryLockError::WouldBlock)
+        ));
     }
 
     #[test]
@@ -663,7 +670,7 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        assert!(file.try_lock_exclusive().unwrap());
+        FileExt::try_lock(&file).unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -684,7 +691,7 @@ mod tests {
             .write(true)
             .open(path)
             .unwrap();
-        assert!(file.try_lock_exclusive().unwrap());
+        FileExt::try_lock(&file).unwrap();
     }
 
     async fn session(
@@ -1035,7 +1042,7 @@ mod tests {
             .create_new(true)
             .open(&path)
             .unwrap();
-        assert!(owner.try_lock_exclusive().unwrap());
+        FileExt::try_lock(&owner).unwrap();
         let probe = OpenOptions::new()
             .read(true)
             .write(true)

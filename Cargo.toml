@@ -43,8 +43,8 @@ cli = [
 
 [dependencies]
 # --- SSH engine (ADR 0001) ---
-russh = "0.61"
-russh-sftp = "2.3"
+russh = "0.63"
+russh-sftp = "2.4"
 
 # --- async runtime (public contract; ADR 0010) ---
 tokio = { version = "1", features = [
@@ -72,19 +72,19 @@ tracing = "0.1"
 thiserror = "2"
 
 # --- dirs for ~/.sshdt resolution ---
-dirs = "6"
+dirs = "7"
 
 # --- optional: serde Config + TOML (feature `config`) ---
 serde = { version = "1", features = ["derive"], optional = true }
-toml = { version = "0.8", optional = true }
+toml = { version = "1", optional = true }
 
 # --- optional: CLI binary deps (feature `cli`) ---
 process-wrap = { version = "10", features = ["tokio1", "process-group", "job-object", "kill-on-drop", "creation-flags"], optional = true }
 time = { version = "0.3", features = ["formatting"], optional = true }
-fs4 = { version = "0.13", optional = true }
+fs4 = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 tempfile = { version = "3", optional = true }
-rand = { version = "0.9", optional = true }
+rand = { version = "0.10", optional = true }
 
 libc = { version = "0.2", optional = true }
 
@@ -97,8 +97,8 @@ tracing-subscriber = { version = "0.3", features = [
 tracing-appender = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-registry = { version = "0.6", optional = true }
-windows-result = { version = "0.4", optional = true }
+windows-registry = { version = "0.100", optional = true }
+windows-result = { version = "0.100", optional = true }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",

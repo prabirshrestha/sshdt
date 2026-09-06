@@ -111,7 +111,7 @@ mod windows {
 
     use anyhow::{Context, ensure};
     use windows_registry::CURRENT_USER;
-    use windows_result::HRESULT;
+    use windows_result::{HRESULT, WIN32_ERROR};
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER,
         GetLastError, HANDLE, LocalFree, SetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -141,7 +141,7 @@ mod windows {
     const STARTUP_ENABLED: [u8; 12] = [
         0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
-    const FILE_NOT_FOUND: HRESULT = HRESULT::from_win32(2);
+    const FILE_NOT_FOUND: HRESULT = WIN32_ERROR(ERROR_FILE_NOT_FOUND).to_hresult();
     const WAIT_TIMEOUT_MS: u32 = 10_000;
 
     pub(super) fn manage(action: Action, startup_args: &[String]) -> anyhow::Result<()> {
