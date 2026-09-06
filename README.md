@@ -112,6 +112,82 @@ the signed-in user. It is not a Windows Service Control Manager service, and it
 does not start before user sign-in. Service management is not supported on
 macOS or Linux yet.
 
+## Managed Dev Tunnels
+
+Install the `devtunnel` CLI on both machines. Run `devtunnel user login` under
+the account that runs sshdt and under the client account.
+
+Add these settings to `~/.ssh/sshdt_config` on the server:
+
+```text
+Port 22
+
+# DevTunnelEnable defaults to no.
+DevTunnelEnable yes
+
+# Set your own tunnel ID. sshdt does not derive it from the hostname
+# or append a region. The CLI can resolve a bare ID such as sshdt-machine1.
+# Use a dedicated tunnel because devtunnel host hosts all configured ports.
+DevTunnelId sshdt-machine1
+
+# Defaults to no. When enabled, create a missing tunnel and SSH port
+# with protocol auto. Existing protocols and access rules stay unchanged.
+DevTunnelAutoCreate yes
+DevTunnelTimeout 30s
+Shell pwsh
+```
+
+Missing login, CLI, ID, or tunnel does not stop the SSH server. sshdt logs the
+reason and retries setup when possible. `DevTunnelTimeout` limits each setup
+attempt, not an active connection. Use `sshdt --check` to validate the config.
+On Windows, restart the existing launch-at-login process to apply changes.
+
+The equivalent server options are:
+
+```sh
+sshdt --port 22 --devtunnel-enable --devtunnel-id sshdt-machine1 --devtunnel-auto-create --devtunnel-timeout 30s
+```
+
+Use `--devtunnel-disable` to override an enabled config. Server options before
+`service enable` are saved with the launch-at-login settings.
+
+On the client, install sshdt and add this entry to `~/.ssh/config`
+(on Windows, `%USERPROFILE%\.ssh\config`):
+
+```sshconfig
+Host machine1
+    User admin
+    Port 22
+    HostKeyAlias sshdt-machine1
+    ProxyCommand sshdt proxy devtunnel sshdt-machine1 --port %p --timeout 30s
+```
+
+Connect with `ssh machine1`. Replace the alias, username, and tunnel ID with
+your own values. This is the SSH client config, separate from the server's
+`sshdt_config`. sshdt does not edit either file for you.
+
+`Port` and `%p` select the remote SSH port. The local port is automatic. To reserve
+an exact local port, add `--local-port 32222` to the proxy command. If that port
+is busy, the request fails. Different tunnels can use the same remote port.
+Concurrent proxies share a connector through a locked local manager. The manager
+stops its connector five seconds after the last session closes. `ControlMaster`
+is optional and follows your SSH client's settings.
+
+`Shell` selects the server's interactive shell. To request a shell from an SSH
+alias, use the standard `RemoteCommand` and `RequestTTY force` options. Those
+settings also affect tools that use the alias.
+
+Host and client CLI output goes to separate daily logs under `~/.sshdt/logs`.
+Each role keeps seven files. Read or follow them with:
+
+```sh
+sshdt service logs --devtunnel --follow
+sshdt service logs --devtunnel-client --follow
+```
+
+These log commands work on macOS, Linux, and Windows. Windows `service status`
+also reports the managed host's tunnel state. Proxy stdout contains only SSH bytes.
+
 ## Quick start
 
 ```sh

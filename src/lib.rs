@@ -47,6 +47,7 @@ pub mod sshd_config;
 pub use auth::{AuthMethod, AuthRequest, AuthResult, Authenticator, PublicKey};
 pub use config::{
     Config, DEFAULT_BIND, DEFAULT_LOGIN_GRACE_SECS, DEFAULT_MAX_STARTUPS, DEFAULT_PORT,
+    DevTunnelConfig, parse_tunnel_timeout, valid_tunnel_id, validate_tunnel_id,
 };
 pub use error::{Error, Result};
 pub use forward::{ForwardDecision, ForwardRequest, Forwarder};
