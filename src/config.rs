@@ -20,6 +20,78 @@ pub const DEFAULT_LOGIN_GRACE_SECS: u64 = 60;
 /// Default cap on concurrent unauthenticated connections (ADR 0018).
 pub const DEFAULT_MAX_STARTUPS: u32 = 32;
 
+/// Settings for CLI-managed Dev Tunnels hosting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "config", serde(default, rename_all = "kebab-case"))]
+pub struct DevTunnelConfig {
+    /// Start hosting when enabled. Missing credentials do not stop SSH.
+    pub enabled: bool,
+    /// Explicit bare or region-qualified tunnel ID.
+    pub id: Option<String>,
+    /// Optional Dev Tunnels executable path for hosting.
+    pub bin: Option<PathBuf>,
+    /// Create a missing tunnel and port when enabled.
+    pub auto_create: bool,
+    /// Maximum time allowed for one setup attempt, in seconds.
+    pub timeout_secs: u64,
+}
+
+impl Default for DevTunnelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            id: None,
+            bin: None,
+            auto_create: false,
+            timeout_secs: 30,
+        }
+    }
+}
+
+/// Check a bare or region-qualified Dev Tunnels ID.
+pub fn valid_tunnel_id(value: &str) -> bool {
+    fn label(value: &str, min: usize, max: usize) -> bool {
+        let bytes = value.as_bytes();
+        (min..=max).contains(&bytes.len())
+            && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+    }
+    let mut parts = value.split('.');
+    let name = parts.next().unwrap_or_default();
+    label(name, 3, 49)
+        && parts.next().is_none_or(|region| label(region, 1, 32))
+        && parts.next().is_none()
+}
+
+/// Validate a bare or region-qualified Dev Tunnels ID.
+pub fn validate_tunnel_id(value: &str) -> std::result::Result<(), String> {
+    if valid_tunnel_id(value) {
+        Ok(())
+    } else {
+        Err("invalid Dev Tunnels ID; use lowercase letters, digits and hyphens".into())
+    }
+}
+
+/// Parse a positive setup timeout in seconds, minutes or hours.
+pub fn parse_tunnel_timeout(value: &str) -> std::result::Result<u64, String> {
+    let (digits, multiplier) = match value.as_bytes().last() {
+        Some(b's' | b'S') => (&value[..value.len() - 1], 1),
+        Some(b'm' | b'M') => (&value[..value.len() - 1], 60),
+        Some(b'h' | b'H') => (&value[..value.len() - 1], 3600),
+        _ => (value, 1),
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(multiplier))
+        .filter(|n| *n > 0)
+        .ok_or_else(|| "timeout must be a positive duration such as 30s or 2m".into())
+}
+
 /// The declarative configuration for a [`Server`](crate::Server).
 ///
 /// Construct it directly, load it from a file, or — more ergonomically — use
@@ -31,6 +103,9 @@ pub const DEFAULT_MAX_STARTUPS: u32 = 32;
 #[cfg_attr(feature = "config", serde(default, rename_all = "kebab-case"))]
 #[non_exhaustive]
 pub struct Config {
+    /// Optional CLI-managed Dev Tunnels hosting.
+    pub dev_tunnel: DevTunnelConfig,
+
     /// Address to bind. Defaults to `127.0.0.1` (ADR 0018).
     pub bind: IpAddr,
 
@@ -105,6 +180,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            dev_tunnel: DevTunnelConfig::default(),
             bind: DEFAULT_BIND,
             port: DEFAULT_PORT,
             host_keys: Vec::new(),
@@ -158,10 +234,30 @@ impl Config {
     /// Parse a [`Config`] from a TOML string.
     #[cfg(feature = "config")]
     pub fn from_toml(s: &str) -> crate::Result<Self> {
-        toml::from_str(s).map_err(|e| crate::Error::ConfigFile {
+        let config: Self = toml::from_str(s).map_err(|e| crate::Error::ConfigFile {
             path: PathBuf::from("<toml>"),
             message: e.to_string(),
-        })
+        })?;
+        config.validate_dev_tunnel()?;
+        Ok(config)
+    }
+
+    /// Validate values supplied by configuration files or command-line flags.
+    pub fn validate_dev_tunnel(&self) -> crate::Result<()> {
+        if self.dev_tunnel.timeout_secs == 0 {
+            return Err(crate::Error::Config(
+                "DevTunnelTimeout must be greater than zero".into(),
+            ));
+        }
+        if self
+            .dev_tunnel
+            .id
+            .as_deref()
+            .is_some_and(|id| !valid_tunnel_id(id))
+        {
+            return Err(crate::Error::Config("invalid DevTunnelId".into()));
+        }
+        Ok(())
     }
 
     /// Serialize this [`Config`] to a TOML string.

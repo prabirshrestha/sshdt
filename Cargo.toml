@@ -32,6 +32,13 @@ cli = [
     "dep:windows-registry",
     "dep:windows-result",
     "dep:windows-sys",
+    "dep:fs4",
+    "dep:serde_json",
+    "dep:tempfile",
+    "dep:rand",
+    "dep:libc",
+    "dep:process-wrap",
+    "dep:time",
 ]
 
 [dependencies]
@@ -44,6 +51,7 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "net",
     "io-util",
+    "io-std",
     "process",
     "sync",
     "macros",
@@ -71,6 +79,15 @@ serde = { version = "1", features = ["derive"], optional = true }
 toml = { version = "0.8", optional = true }
 
 # --- optional: CLI binary deps (feature `cli`) ---
+process-wrap = { version = "10", features = ["tokio1", "process-group", "job-object", "kill-on-drop", "creation-flags"], optional = true }
+time = { version = "0.3", features = ["formatting"], optional = true }
+fs4 = { version = "0.13", optional = true }
+serde_json = { version = "1", optional = true }
+tempfile = { version = "3", optional = true }
+rand = { version = "0.9", optional = true }
+
+libc = { version = "0.2", optional = true }
+
 argh = { version = "0.1", optional = true }
 anyhow = { version = "1", optional = true }
 tracing-subscriber = { version = "0.3", features = [
@@ -87,6 +104,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_System_Memory",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Console",
 ], optional = true }
 
 [dev-dependencies]

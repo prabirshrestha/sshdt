@@ -12,6 +12,7 @@ use sshdt::{Config, Server};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
+mod devtunnel;
 mod service;
 
 /// sshdt — a tiny, faithful, standard SSH server you can `ssh` into.
@@ -98,12 +99,34 @@ struct Args {
     #[argh(option)]
     max_startups: Option<u32>,
 
+    /// enable optional Dev Tunnels hosting
+    #[argh(switch)]
+    devtunnel_enable: bool,
+    /// disable Dev Tunnels hosting from the config file
+    #[argh(switch)]
+    devtunnel_disable: bool,
+    /// explicit Dev Tunnels ID
+    #[argh(option)]
+    devtunnel_id: Option<String>,
+    /// optional Dev Tunnels executable path
+    #[argh(option)]
+    devtunnel_bin: Option<PathBuf>,
+    /// create the configured tunnel and SSH port if missing
+    #[argh(switch)]
+    devtunnel_auto_create: bool,
+    /// tunnel setup timeout, such as 30s or 2m
+    #[argh(option)]
+    devtunnel_timeout: Option<String>,
+    /// validate configuration and exit
+    #[argh(switch)]
+    check: bool,
+
     /// print version and exit
     #[argh(switch)]
     version: bool,
 
     /// run under Windows launch-at-login process control
-    #[argh(switch, hidden_help)]
+    #[argh(switch)]
     service_run: bool,
 
     /// manage launch at login for the current Windows user
@@ -115,6 +138,52 @@ struct Args {
 #[argh(subcommand)]
 enum Command {
     Service(ServiceArgs),
+    Proxy(ProxyArgs),
+    Broker(BrokerArgs),
+    Guardian(GuardianArgs),
+}
+
+/// Proxy an SSH connection through a provider.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "proxy")]
+struct ProxyArgs {
+    #[argh(subcommand)]
+    command: ProxyCommand,
+}
+#[derive(FromArgs)]
+#[argh(subcommand)]
+enum ProxyCommand {
+    Devtunnel(ProxyTunnelArgs),
+}
+/// Carry SSH bytes through a managed Dev Tunnel.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "devtunnel")]
+struct ProxyTunnelArgs {
+    #[argh(positional)]
+    tunnel_id: String,
+    /// destination SSH port
+    #[argh(option, default = "2222")]
+    port: u16,
+    /// setup timeout, such as 30s
+    #[argh(option, default = "String::from(\"30s\")")]
+    timeout: String,
+    /// local port number or auto
+    #[argh(option, default = "String::from(\"auto\")")]
+    local_port: String,
+}
+/// Internal shared tunnel process.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "devtunnel-broker")]
+struct BrokerArgs {
+    #[argh(positional)]
+    tunnel_id: String,
+}
+/// Internal owned process guardian.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "devtunnel-guardian")]
+struct GuardianArgs {
+    #[argh(positional, greedy)]
+    arguments: Vec<String>,
 }
 
 /// Manage launch at login for the current Windows user.
@@ -180,6 +249,12 @@ struct ServiceLogs {
     /// continue printing new log entries
     #[argh(switch, short = 'f')]
     follow: bool,
+    /// show the separate Dev Tunnels host log
+    #[argh(switch)]
+    devtunnel: bool,
+    /// show the separate Dev Tunnels client log
+    #[argh(switch)]
+    devtunnel_client: bool,
 }
 
 #[tokio::main]
@@ -202,8 +277,40 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    if let Some(Command::Service(service_args)) = &args.command {
-        return manage_service(service_args, &args);
+    if let Some(command) = &args.command {
+        return match command {
+            Command::Service(service_args) => manage_service(service_args, &args),
+            Command::Proxy(ProxyArgs {
+                command: ProxyCommand::Devtunnel(proxy),
+            }) => {
+                let timeout =
+                    sshdt::parse_tunnel_timeout(&proxy.timeout).map_err(anyhow::Error::msg)?;
+                devtunnel::client::proxy(devtunnel::client::ProxyRequest {
+                    tunnel: proxy.tunnel_id.clone(),
+                    remote_port: proxy.port,
+                    local_port: if proxy.local_port == "auto" {
+                        None
+                    } else {
+                        Some(
+                            proxy
+                                .local_port
+                                .parse()
+                                .context("local port must be auto or a number")?,
+                        )
+                    },
+                    timeout: std::time::Duration::from_secs(timeout),
+                })
+                .await
+            }
+            Command::Broker(broker) => devtunnel::client::broker(broker.tunnel_id.clone()).await,
+            Command::Guardian(guardian) => devtunnel::process::guardian(guardian.arguments.clone()),
+        };
+    }
+    if args.check {
+        let _guard = init_logging(&args, false)?;
+        build_config(&args)?;
+        println!("configuration is valid");
+        return Ok(());
     }
 
     run_server(&args, false).await
@@ -232,6 +339,7 @@ async fn run_server(args: &Args, _service_mode: bool) -> anyhow::Result<()> {
         let config = build_config(args).context("invalid configuration")?;
         let bind = std::net::SocketAddr::new(config.bind, config.port);
 
+        let tunnel_config = config.dev_tunnel.clone();
         let server = Server::from_config(config).context("failed to build server")?;
         let handle = server
             .serve()
@@ -243,17 +351,19 @@ async fn run_server(args: &Args, _service_mode: bool) -> anyhow::Result<()> {
         }
 
         tracing::info!(addr = %handle.local_addr(), "sshdt is ready");
+        let tunnel = devtunnel::host::start(tunnel_config, handle.local_addr());
 
-        if let Some(service_run) = &service_run {
-            service_run.wait_for_stop().await?;
+        let stopped = if let Some(service_run) = &service_run {
+            service_run.wait_for_stop().await
         } else {
             tokio::signal::ctrl_c()
                 .await
-                .context("failed to listen for Ctrl-C")?;
-        }
+                .context("failed to listen for Ctrl-C")
+        };
         tracing::info!("shutting down");
+        tunnel.shutdown().await;
         handle.shutdown().await;
-        Ok(())
+        stopped
     }
     .await;
     if service_mode && let Err(error) = &result {
@@ -263,11 +373,26 @@ async fn run_server(args: &Args, _service_mode: bool) -> anyhow::Result<()> {
 }
 
 fn manage_service(service_args: &ServiceArgs, args: &Args) -> anyhow::Result<()> {
+    if let ServiceCommand::Logs(logs) = &service_args.command {
+        anyhow::ensure!(
+            !(logs.devtunnel && logs.devtunnel_client),
+            "choose --devtunnel or --devtunnel-client"
+        );
+        if logs.devtunnel || logs.devtunnel_client {
+            return devtunnel::logs::show(
+                if logs.devtunnel { "host" } else { "client" },
+                logs.follow,
+            );
+        }
+    }
     match &service_args.command {
         ServiceCommand::Enable(_) => service::manage(service::Action::Enable, startup_args(args)?),
         ServiceCommand::Disable(_) => service::manage(service::Action::Disable, Vec::new()),
         ServiceCommand::Uninstall(_) => service::manage(service::Action::Uninstall, Vec::new()),
-        ServiceCommand::Status(_) => service::manage(service::Action::Status, Vec::new()),
+        ServiceCommand::Status(_) => {
+            service::manage(service::Action::Status, Vec::new())?;
+            devtunnel::host::print_status()
+        }
         ServiceCommand::Start(_) => service::manage(service::Action::Start, Vec::new()),
         ServiceCommand::Stop(_) => service::manage(service::Action::Stop, Vec::new()),
         ServiceCommand::Restart(_) => service::manage(service::Action::Restart, Vec::new()),
@@ -286,6 +411,22 @@ fn manage_service(service_args: &ServiceArgs, args: &Args) -> anyhow::Result<()>
 fn startup_args(args: &Args) -> anyhow::Result<Vec<String>> {
     let mut result = Vec::new();
 
+    push_switch(&mut result, "--devtunnel-enable", args.devtunnel_enable);
+    push_switch(&mut result, "--devtunnel-disable", args.devtunnel_disable);
+    push_option(&mut result, "--devtunnel-id", args.devtunnel_id.as_deref());
+    if let Some(path) = &args.devtunnel_bin {
+        push_path_option(&mut result, "--devtunnel-bin", path)?;
+    }
+    push_switch(
+        &mut result,
+        "--devtunnel-auto-create",
+        args.devtunnel_auto_create,
+    );
+    push_option(
+        &mut result,
+        "--devtunnel-timeout",
+        args.devtunnel_timeout.as_deref(),
+    );
     push_option(&mut result, "--port", args.port);
     for path in &args.host_key {
         push_path_option(&mut result, "--host-key", path)?;
@@ -364,6 +505,10 @@ fn build_config(args: &Args) -> anyhow::Result<Config> {
         args.config.is_none() || !args.no_config,
         "--config and --no-config cannot be used together"
     );
+    anyhow::ensure!(
+        !(args.devtunnel_enable && args.devtunnel_disable),
+        "--devtunnel-enable and --devtunnel-disable cannot be used together"
+    );
     let home = dirs::home_dir();
     let config_path = select_config_path(args.config.as_deref(), args.no_config, home.as_deref());
     let mut config = match config_path {
@@ -414,6 +559,26 @@ fn build_config(args: &Args) -> anyhow::Result<Config> {
         config.max_startups = max;
     }
 
+    if args.devtunnel_enable {
+        config.dev_tunnel.enabled = true;
+    }
+    if args.devtunnel_disable {
+        config.dev_tunnel.enabled = false;
+    }
+    if let Some(id) = &args.devtunnel_id {
+        config.dev_tunnel.id = Some(id.clone());
+    }
+    if let Some(bin) = &args.devtunnel_bin {
+        config.dev_tunnel.bin = Some(bin.clone());
+    }
+    if args.devtunnel_auto_create {
+        config.dev_tunnel.auto_create = true;
+    }
+    if let Some(timeout) = &args.devtunnel_timeout {
+        config.dev_tunnel.timeout_secs =
+            sshdt::parse_tunnel_timeout(timeout).map_err(anyhow::Error::msg)?;
+    }
+    config.validate_dev_tunnel()?;
     Ok(config)
 }
 
@@ -498,6 +663,83 @@ mod tests {
 
     fn parse(command: &[&str]) -> Args {
         Args::from_args(&["sshdt"], command).expect("arguments should parse")
+    }
+
+    #[test]
+    fn tunnel_flags_roundtrip_through_service_options() {
+        let args = parse(&[
+            "--no-config",
+            "--devtunnel-enable",
+            "--devtunnel-id",
+            "my-tunnel",
+            "--devtunnel-auto-create",
+            "--devtunnel-bin",
+            r"C:\Program Files\Dev Tunnels\devtunnel.exe",
+            "--devtunnel-timeout",
+            "45s",
+            "service",
+            "enable",
+        ]);
+        let restored = parse_saved_service_args(startup_args(&args).unwrap()).unwrap();
+        let config = super::build_config(&restored).unwrap();
+        assert!(config.dev_tunnel.enabled);
+        assert!(config.dev_tunnel.auto_create);
+        assert_eq!(config.dev_tunnel.id.as_deref(), Some("my-tunnel"));
+        assert_eq!(config.dev_tunnel.timeout_secs, 45);
+        assert_eq!(
+            config.dev_tunnel.bin,
+            Some(
+                std::env::current_dir()
+                    .unwrap()
+                    .join(r"C:\Program Files\Dev Tunnels\devtunnel.exe")
+            )
+        );
+    }
+
+    #[test]
+    fn tunnel_flags_override_config_and_reject_conflicts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sshdt_config");
+        std::fs::write(
+            &path,
+            "DevTunnelEnable yes\nDevTunnelId old-tunnel\nDevTunnelTimeout 30s\nDevTunnelBin old-devtunnel\n",
+        )
+        .unwrap();
+        let args = parse(&[
+            "-f",
+            path.to_str().unwrap(),
+            "--devtunnel-disable",
+            "--devtunnel-id",
+            "new-tunnel",
+            "--devtunnel-bin",
+            "new-devtunnel",
+            "--devtunnel-timeout",
+            "2m",
+        ]);
+        let config = super::build_config(&args).unwrap();
+        assert!(!config.dev_tunnel.enabled);
+        assert_eq!(config.dev_tunnel.id.as_deref(), Some("new-tunnel"));
+        assert_eq!(config.dev_tunnel.timeout_secs, 120);
+        assert_eq!(
+            config.dev_tunnel.bin,
+            Some(std::path::PathBuf::from("new-devtunnel"))
+        );
+        assert!(
+            super::build_config(&parse(&[
+                "--no-config",
+                "--devtunnel-enable",
+                "--devtunnel-disable"
+            ]))
+            .is_err()
+        );
+        assert!(super::build_config(&parse(&["--no-config", "--devtunnel-timeout", "0"])).is_err());
+        assert!(
+            super::build_config(&parse(&["--no-config", "--devtunnel-enable"]))
+                .unwrap()
+                .dev_tunnel
+                .id
+                .is_none()
+        );
     }
 
     #[test]
@@ -622,7 +864,7 @@ mod tests {
         };
         assert!(matches!(
             service.command,
-            ServiceCommand::Logs(ServiceLogs { follow: true })
+            ServiceCommand::Logs(ServiceLogs { follow: true, .. })
         ));
     }
 

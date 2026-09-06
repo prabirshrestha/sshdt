@@ -102,7 +102,31 @@ pub fn parse(input: &str) -> Result<Config> {
                     config.accept_env.push(pattern.to_string());
                 }
             }
-            "forcecommand" => {
+            "devtunnelenable" => {
+                config.dev_tunnel.enabled =
+                    parse_yes_no(value).ok_or_else(|| invalid(&ctx(), "DevTunnelEnable", value))?;
+            }
+            "devtunnelbin" => {
+                if value.is_empty() {
+                    return Err(invalid(&ctx(), "DevTunnelBin", value));
+                }
+                config.dev_tunnel.bin = Some(PathBuf::from(value));
+            }
+            "devtunnelid" => {
+                if !crate::valid_tunnel_id(value) {
+                    return Err(invalid(&ctx(), "DevTunnelId", value));
+                }
+                config.dev_tunnel.id = Some(value.to_owned());
+            }
+            "devtunnelautocreate" => {
+                config.dev_tunnel.auto_create = parse_yes_no(value)
+                    .ok_or_else(|| invalid(&ctx(), "DevTunnelAutoCreate", value))?;
+            }
+            "devtunneltimeout" => {
+                config.dev_tunnel.timeout_secs = crate::parse_tunnel_timeout(value)
+                    .map_err(|_| invalid(&ctx(), "DevTunnelTimeout", value))?;
+            }
+            "shell" | "forcecommand" => {
                 config.shell = Some(value.to_string());
             }
             "banner" => {
@@ -208,7 +232,10 @@ fn parse_time(value: &str) -> Option<u64> {
         'h' | 'H' => (&value[..value.len() - 1], 3600),
         _ => return None,
     };
-    num.trim().parse::<u64>().ok().map(|n| n * mult)
+    num.trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(mult))
 }
 
 /// `Banner` names a file whose contents are shown; if it isn't a readable file,
@@ -224,6 +251,59 @@ fn read_banner(value: &str) -> String {
 mod tests {
     use super::{parse, parse_for_user, strip_comment};
     use std::path::PathBuf;
+
+    #[test]
+    fn dev_tunnel_settings_are_explicit_and_strict() {
+        let defaults = parse("").unwrap();
+        assert_eq!(defaults.dev_tunnel, crate::DevTunnelConfig::default());
+        let config = parse("DevTunnelEnable yes\nDevTunnelId sshdt-pswin01.usw2\nDevTunnelAutoCreate yes\nDevTunnelTimeout 2m\nShell pwsh -NoProfile").unwrap();
+        assert!(config.dev_tunnel.enabled);
+        assert!(config.dev_tunnel.auto_create);
+        assert_eq!(config.dev_tunnel.id.as_deref(), Some("sshdt-pswin01.usw2"));
+        assert_eq!(config.dev_tunnel.timeout_secs, 120);
+        assert_eq!(config.shell.as_deref(), Some("pwsh -NoProfile"));
+        assert!(
+            parse("DevTunnelEnable yes")
+                .unwrap()
+                .dev_tunnel
+                .id
+                .is_none()
+        );
+        for line in [
+            "DevTunnelEnable true",
+            "DevTunnelAutoCreate maybe",
+            "DevTunnelId SSHDT",
+            "DevTunnelId a.b.c",
+            "DevTunnelId --bad",
+            "DevTunnelTimeout 0",
+            "DevTunnelTimeout 18446744073709551615h",
+        ] {
+            assert!(parse(line).is_err(), "{line}");
+        }
+    }
+
+    #[test]
+    fn dev_tunnel_bin_preserves_windows_paths_and_spaces() {
+        let config =
+            parse(r"DevTunnelBin C:\Program Files\Dev Tunnels\devtunnel.exe # optional").unwrap();
+        assert_eq!(
+            config.dev_tunnel.bin,
+            Some(PathBuf::from(r"C:\Program Files\Dev Tunnels\devtunnel.exe"))
+        );
+        assert!(parse("DevTunnelBin # missing path").is_err());
+        let decoded = crate::Config::from_toml(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(decoded.dev_tunnel.bin, config.dev_tunnel.bin);
+    }
+
+    #[test]
+    fn dev_tunnel_toml_roundtrip() {
+        let config =
+            parse("DevTunnelId my-tunnel\nDevTunnelEnable yes\nDevTunnelTimeout 45s").unwrap();
+        let decoded = crate::Config::from_toml(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(decoded.dev_tunnel, config.dev_tunnel);
+        assert!(crate::Config::from_toml("[dev-tunnel]\ntimeout-secs = 0").is_err());
+        assert!(crate::Config::from_toml("[dev-tunnel]\nid = 'BAD'").is_err());
+    }
 
     #[test]
     fn parses_core_directives() {
