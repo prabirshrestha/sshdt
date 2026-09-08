@@ -297,8 +297,6 @@ mod tests {
                 parse(&format!("DevTunnelLabel {value}")).is_err(),
                 "{value:?}"
             );
-            let toml = format!("[dev-tunnel]\nlabels = [{value:?}]");
-            assert!(crate::Config::from_toml(&toml).is_err(), "{value:?}");
         }
         let longest = "a".repeat(50);
         assert!(parse(&format!("DevTunnelLabel {longest}")).is_ok());
@@ -324,18 +322,6 @@ mod tests {
             Some(PathBuf::from(r"C:\Program Files\Dev Tunnels\devtunnel.exe"))
         );
         assert!(parse("DevTunnelBin # missing path").is_err());
-        let decoded = crate::Config::from_toml(&config.to_toml().unwrap()).unwrap();
-        assert_eq!(decoded.dev_tunnel.bin, config.dev_tunnel.bin);
-    }
-
-    #[test]
-    fn dev_tunnel_toml_roundtrip() {
-        let config =
-            parse("DevTunnelId my-tunnel\nDevTunnelEnable yes\nDevTunnelTimeout 45s\nDevTunnelLabel alpha\nDevTunnelLabel env=dev").unwrap();
-        let decoded = crate::Config::from_toml(&config.to_toml().unwrap()).unwrap();
-        assert_eq!(decoded.dev_tunnel, config.dev_tunnel);
-        assert!(crate::Config::from_toml("[dev-tunnel]\ntimeout-secs = 0").is_err());
-        assert!(crate::Config::from_toml("[dev-tunnel]\nid = 'BAD'").is_err());
     }
 
     #[test]

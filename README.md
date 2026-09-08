@@ -1,61 +1,173 @@
 # sshdt
 
-**sshdt** — a *tiny* `sshd` — is a faithful, standard **SSH server** in Rust, a library **and** a CLI in one crate.
-You launch it with one command and connect with a **normal `ssh` client** (plus **`sftp`** and
-**`scp`**), IDE-over-SSH tools (**VS Code Remote-SSH**, **Zed Remote Development**), and terminal
-multiplexers (**rmux**, **tmux** — they're just commands you run). It listens on a local TCP port
-like `sshd`.
+sshdt is an SSH server for Linux, macOS, and Windows. It provides a CLI and a
+Rust library built on [`russh`](https://github.com/Eugeny/russh).
 
-Built on [`russh`](https://github.com/Eugeny/russh). Dual-licensed **MIT OR Apache-2.0**.
+It supports remote commands, interactive shells, SFTP, SCP, and local TCP
+forwarding with `ssh -L`. You can connect with OpenSSH, VS Code Remote-SSH,
+and Zed Remote Development.
 
 > [!WARNING]
-> **Not production-ready. Do not expose sshdt to the public internet.**
-> This is a developer tool, not a hardened multi-user `sshd`. It runs every session as the
-> OS user that launched it (no per-user accounts, no privilege separation, no PAM), and has
-> not had a security audit. Only run it on a **trusted network (e.g. loopback or a private
-> LAN)** or, for remote access, **behind a private tunnel** such as
-> [Tailscale](https://tailscale.com), a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/),
-> or [Dev tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/) — never by
-> port-forwarding it straight to the internet. It binds to `127.0.0.1` by default for this
-> reason; only change `-b`/`ListenAddress` if you understand the exposure.
+> sshdt is a development tool. It is not production-ready and has not had a
+> security audit. Every session runs as the OS user who started the server.
+> There is no privilege separation or PAM support.
+>
+> Keep it on loopback, a trusted private network, or behind a private tunnel.
+> Do not expose it directly to the public internet. It binds to `127.0.0.1`
+> by default. Remote access options include [Tailscale](https://tailscale.com),
+> [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/),
+> and [Dev tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/).
 
-## Features
+## Build and install
 
-- **exec**, interactive **shell/PTY**, **SFTP**, and **`direct-tcpip`** local forwarding (`ssh -L`).
-- `exec` is **full-duplex and long-lived** — the channel IDE control servers run over.
-- **One generic command runner**: `$SHELL`, `pwsh`, `wsl`, `busybox`, `tmux`, `rmux` are all just
-  commands. Drop into a multiplexer with `--shell "rmux new-session -A -s main"`.
-- **Auth**: anonymous by default, or `--password`, or public-key (`authorized_keys` files **and**
-  inline keys). Any one method succeeding is enough.
-- **Host key**: auto-generated + persisted **ed25519** at `~/.sshdt/host_ed25519`
-  (Windows `%USERPROFILE%\.sshdt`); `-h` is repeatable.
-- **SFTP**: full filesystem as the launching OS user (OpenSSH parity); `--sftp-root` jails it.
-- **Cross-platform**: Linux, macOS, Windows (ConPTY via `rmux-pty`).
-- **No global state** — run many independent `Server` instances in one process.
-
-## Install / build
+From a checkout, use the Rust toolchain pinned in `rust-toolchain.toml`:
 
 ```sh
-cargo build --release      # binary at target/release/sshdt
-cargo install --path .     # or install the CLI
+cargo build --release
+cargo install --path .
 ```
 
-Requires the toolchain pinned in `rust-toolchain.toml` (latest stable; edition 2024).
+The build produces `target/release/sshdt`. The install command adds the CLI
+to Cargo's binary directory.
 
-### Windows launch at login
+## Quick start
 
-On Windows, sshdt can register itself to start when the current user signs in:
+Start a server on `127.0.0.1:2222`:
 
-```powershell
-sshdt service enable
-sshdt service start
-sshdt service status
-sshdt service restart
-sshdt service logs --follow
-sshdt service stop
-sshdt service disable
-sshdt service uninstall
+```sh
+sshdt -p 2222
 ```
+
+By default, sshdt accepts anonymous connections. On first run, it creates an
+Ed25519 host key at `~/.sshdt/host_ed25519` and reuses it on later starts.
+On Windows, the key is under `%USERPROFILE%\.sshdt`. Use `-h <file>` to
+select a host key. You can supply more than one.
+
+Connect from another terminal:
+
+```sh
+ssh -p 2222 user@127.0.0.1 'echo hi'
+sftp -P 2222 user@127.0.0.1
+ssh -p 2222 user@127.0.0.1 -L 9000:127.0.0.1:8080
+```
+
+To require a password or public key, start the server with one of these options:
+
+```sh
+sshdt -p 2222 --password hunter2
+sshdt -p 2222 --authorized-keys ~/.ssh/authorized_keys
+sshdt -p 2222 --pubkey "ssh-ed25519 AAAAC3Nza... user@laptop"
+```
+
+`--authorized-keys` and `--pubkey` are repeatable. If you configure multiple
+authentication methods, any one successful method grants access.
+
+SFTP and SCP can access the files available to the server's OS user. Use
+`--sftp-root <dir>` to restrict file transfers to a directory.
+
+### Choose a shell
+
+`--shell` sets the interactive session command. On Unix, the default is
+`$SHELL`, then `/bin/sh`. On Windows, sshdt tries `pwsh`, `powershell`, then `cmd`.
+
+```sh
+sshdt --shell bash
+sshdt --shell zsh
+sshdt --shell fish
+sshdt --shell pwsh
+sshdt --shell cmd.exe
+```
+
+You can also start [rmux](https://rmux.io) as the session command:
+
+```sh
+sshdt -p 2223 --shell "rmux new-session -A -s main"
+ssh -tt -p 2223 user@127.0.0.1
+```
+
+The rmux daemon keeps the session alive after you disconnect. Reconnect with
+the same SSH command to resume it.
+
+## Connect with SSH or an IDE
+
+Start a server that accepts your public key:
+
+```sh
+sshdt -p 2222 --authorized-keys ~/.ssh/id_ed25519.pub
+```
+
+Add an alias to `~/.ssh/config`:
+
+```sshconfig
+Host mybox
+	HostName 127.0.0.1
+	Port 2222
+	User user
+	IdentityFile ~/.ssh/id_ed25519
+```
+
+For a remote server, replace `HostName` with its LAN or tunnel address.
+The server must listen on a reachable address. The SSH username does not
+change the OS account that runs the session.
+
+Use the alias with OpenSSH:
+
+```sh
+ssh mybox
+ssh mybox 'uname -a'
+sftp mybox
+scp file mybox:/path/
+ssh mybox -L 9000:127.0.0.1:8080
+```
+
+VS Code Remote-SSH and Zed use the system SSH client and `~/.ssh/config`.
+Use public-key authentication for these clients.
+
+### VS Code Remote-SSH
+
+Install the Remote-SSH extension, then open a remote folder:
+
+```sh
+code --remote ssh-remote+mybox /path/to/folder
+```
+
+You can also select **Remote-SSH: Connect to Host** in the command palette
+and choose `mybox`.
+
+### Zed Remote Development
+
+Open a remote folder:
+
+```sh
+zed ssh://mybox/path/to/folder
+```
+
+You can also select **projects: open remote** in the command palette,
+choose **Connect New Server**, and enter `ssh mybox`.
+
+Zed downloads a server that matches its version. Use an official Zed build.
+A custom build needs a matching published server.
+
+## Users and authentication
+
+Every session runs as the OS user who started sshdt. The SSH username does
+not select an OS account. The session's `$USER` and `$HOME` refer to the
+server's OS user.
+
+By default, sshdt accepts any username. To limit the accepted names:
+
+- Use `--strict-user` to accept only the server's OS username.
+- Use `--allow-user <name>` to accept a specific name. Repeat the option for
+  more names. Matching is exact and case-sensitive. Names can contain spaces,
+  as in `--allow-user "John Doe"`.
+- Combine both options to accept the listed names and the server's OS username.
+
+These options restrict login names. They do not isolate sessions or change
+permissions. Use OpenSSH `sshd` if each login must run as a separate OS account.
+
+## Windows launch at login
+
+On Windows, sshdt can start when the current user signs in.
 
 Store sshdt server settings in `%USERPROFILE%\.ssh\sshdt_config`, beside the
 OpenSSH authorized keys file at `%USERPROFILE%\.ssh\authorized_keys`. For
@@ -76,8 +188,7 @@ sshdt service start
 
 After you edit the config, run `sshdt service restart` to apply the changes.
 Use `127.0.0.1` instead of `0.0.0.0` if only local clients must connect.
-As in OpenSSH, a relative `AuthorizedKeysFile` path starts at the current
-user's home directory.
+A relative `AuthorizedKeysFile` path starts at the current user's home directory.
 
 `service enable` saves the server options that appear before `service`. Relative
 file and directory paths are converted to absolute paths. Run the command again
@@ -95,70 +206,60 @@ and keeps up to seven files. `service logs` prints the current log. Add
 `--follow` or `-f` to continue printing new entries across log rotation. If
 `--log-file` was set during `service enable`, these commands use that file instead.
 
-If `--config` is not set, sshdt automatically loads
-`%USERPROFILE%\.ssh\sshdt_config` when that file exists. If it does not exist,
-sshdt uses its normal built-in defaults. These include `127.0.0.1:2222`, the
-persistent host key at `%USERPROFILE%\.sshdt\host_ed25519`, anonymous
-authentication, and the default Windows shell. Use `--no-config` to skip the
-automatic config file:
+sshdt loads `%USERPROFILE%\.ssh\sshdt_config` if it exists.
+Use `--config <file>` to select another file or `--no-config` to skip it:
 
 ```powershell
 sshdt --no-config service enable
 ```
 
-This uses the current user's Windows `Run` registry entry, like AI Proxy's
-**Launch at login** setting. It needs no administrator rights and runs sshdt as
-the signed-in user. It is not a Windows Service Control Manager service, and it
-does not start before user sign-in. Service management is not supported on
-macOS or Linux yet.
+sshdt uses the current user's Windows `Run` registry entry. It needs no
+administrator rights and starts only after sign-in. It is not a Windows
+Service Control Manager service. Service management is available only on Windows.
 
-## Managed Dev Tunnels
+## Managed Dev tunnels
 
 Install the `devtunnel` CLI on both machines. Run `devtunnel user login` under
 the account that runs sshdt and under the client account.
 
 Add these settings to `~/.ssh/sshdt_config` on the server:
 
+Use a dedicated tunnel. `devtunnel host` hosts every configured port on that
+tunnel. Set your own tunnel ID. sshdt does not derive it from the hostname
+or append a region. The CLI can resolve a bare ID such as `sshdt-machine1`.
+
 ```text
 Port 22
-
-# DevTunnelEnable defaults to no.
 DevTunnelEnable yes
-
-# Optional executable path. Otherwise use SSHDT_DEVTUNNEL_BIN or PATH.
-# DevTunnelBin C:\tools\devtunnel.exe
-
-# Set your own tunnel ID. sshdt does not derive it from the hostname
-# or append a region. The CLI can resolve a bare ID such as sshdt-machine1.
-# Use a dedicated tunnel because devtunnel host hosts all configured ports.
 DevTunnelId sshdt-machine1
-
-# Defaults to no. When enabled, create a missing tunnel and SSH port
-# with protocol auto. Existing protocols and access rules stay unchanged.
 DevTunnelAutoCreate yes
 DevTunnelTimeout 30s
-
 DevTunnelLabel environment=dev
 DevTunnelLabel team=platform
 Shell pwsh
 ```
+
+`DevTunnelEnable` and `DevTunnelAutoCreate` default to `no`.
+Auto-create adds a missing tunnel and SSH port with protocol `auto`.
+It preserves existing access rules. An existing SSH port must use protocol
+`auto`, or tunnel setup fails.
+
+To select the executable, set `DevTunnelBin`, such as
+`DevTunnelBin C:\tools\devtunnel.exe`. Otherwise, sshdt uses
+`SSHDT_DEVTUNNEL_BIN`, then searches `PATH`.
 
 Missing login, CLI, ID, or tunnel does not stop the SSH server. sshdt logs the
 reason and retries setup when possible. `DevTunnelTimeout` limits each setup
 attempt, not an active connection. Use `sshdt --check` to validate the config.
 On Windows, restart the existing launch-at-login process to apply changes.
 
-The equivalent server options are:
+You can also set tunnel options on the command line:
 
 ```sh
 sshdt --port 22 --devtunnel-enable --devtunnel-id sshdt-machine1 --devtunnel-auto-create --devtunnel-timeout 30s --devtunnel-label environment=dev --devtunnel-label team=platform
 ```
 
-Use `--devtunnel-label environment=dev --devtunnel-label team=platform` to set
-labels on the command line. If supplied, these flags replace the labels from
-the config file. Library TOML configuration uses `labels = ["environment=dev",
-"team=platform"]` in `[dev-tunnel]`.
-
+Command-line labels replace the labels from the config file.
 Labels are optional. Each label must contain 1 to 50 ASCII letters, digits,
 underscores, hyphens, or equals signs. You can configure up to 100 unique labels.
 sshdt adds missing labels to new and existing tunnels before it starts hosting.
@@ -170,15 +271,15 @@ Use `--devtunnel-bin /path/to/devtunnel` to override `DevTunnelBin`.
 Use `--devtunnel-disable` to override an enabled config. Server options before
 `service enable` are saved with the launch-at-login settings.
 
-On the client, install sshdt and add this entry to `~/.ssh/config`
-(on Windows, `%USERPROFILE%\.ssh\config`):
+On the client, install sshdt and add this entry to `~/.ssh/config`.
+On Windows, use `%USERPROFILE%\.ssh\config`:
 
 ```sshconfig
 Host machine1
-    User admin
-    Port 22
-    HostKeyAlias sshdt-machine1
-    ProxyCommand sshdt proxy devtunnel sshdt-machine1 --port %p --timeout 30s
+	User admin
+	Port 22
+	HostKeyAlias sshdt-machine1
+	ProxyCommand sshdt proxy devtunnel sshdt-machine1 --port %p --timeout 30s
 ```
 
 Connect with `ssh machine1`. Replace the alias, username, and tunnel ID with
@@ -207,263 +308,106 @@ sshdt service logs --devtunnel-client --follow
 These log commands work on macOS, Linux, and Windows. Windows `service status`
 also reports the managed host's tunnel state. Proxy stdout contains only SSH bytes.
 
-## Quick start
-
-```sh
-# Anonymous loopback server on port 2222 (auto-generates a host key on first run).
-sshdt -p 2222
-
-# Then, from another terminal:
-ssh -p 2222 user@127.0.0.1 'echo hi'
-sftp -P 2222 user@127.0.0.1      # put/get round-trips
-ssh -p 2222 user@127.0.0.1 -L 9000:127.0.0.1:8080            # local forward
-```
-
-Password or key auth:
-
-```sh
-sshdt -p 2222 --password hunter2
-sshdt -p 2222 --authorized-keys ~/.ssh/authorized_keys
-sshdt -p 2222 --pubkey "ssh-ed25519 AAAAC3Nza... user@laptop"
-```
-
-Choose the session shell/command with `--shell` — it's just a program sshdt runs (default: `$SHELL`,
-else `/bin/sh`; Windows: `pwsh` → `powershell` → `cmd`):
-
-```sh
-sshdt --shell bash
-sshdt --shell zsh
-sshdt --shell fish
-sshdt --shell pwsh          # or: powershell
-sshdt --shell cmd.exe       # Windows
-```
-
-Persistent multiplexer session (`--shell` is also how you drop into one; it survives reconnects via
-the multiplexer's own daemon):
-
-```sh
-sshdt -p 2223 --shell "rmux new-session -A -s main"
-ssh -tt -p 2223 user@127.0.0.1        # lands in the session; reconnect to resume
-```
-
-## Connecting (ssh, VS Code, Zed)
-
-sshdt is a faithful SSH server, so clients connect the normal way. **VS Code Remote-SSH and Zed Remote
-shell out to the *system* `ssh` and read `~/.ssh/config`**, so a `Host` alias is the cleanest setup and
-makes all three clients "just work". Use **key auth** for the IDEs.
-
-Start a server that accepts your key (the host key is auto-generated and persisted, so `known_hosts`
-stays stable across restarts):
-
-```sh
-sshdt -p 2222 --authorized-keys ~/.ssh/id_ed25519.pub
-```
-
-Add a `Host` to `~/.ssh/config`:
-
-```sshconfig
-Host mybox
-    HostName 127.0.0.1        # or the LAN/tunnel address (start sshdt with -b 0.0.0.0)
-    Port 2222
-    User user                 # cosmetic — sessions run as the OS user that launched sshdt
-    IdentityFile ~/.ssh/id_ed25519
-```
-
-**Plain ssh / sftp / scp**
-
-```sh
-ssh mybox                      # interactive shell
-ssh mybox 'uname -a'           # exec
-sftp mybox                     # put/get
-scp file mybox:/path/          # copy
-ssh mybox -L 9000:127.0.0.1:8080   # local forward
-```
-
-**VS Code — Remote-SSH** (needs the *Remote-SSH* extension)
-
-```sh
-code --remote ssh-remote+mybox /path/to/folder
-```
-…or `Cmd/Ctrl-Shift-P → Remote-SSH: Connect to Host → mybox`. VS Code installs its server under
-`~/.vscode-server` on the remote and runs it over the exec channel — no port forwarding needed.
-
-**Zed — Remote Development**
-
-```sh
-zed ssh://mybox/path/to/folder
-```
-…or in Zed: `Cmd-Shift-P → projects: open remote → Connect New Server`, and in the *"command you use to
-SSH into this server"* field type the ssh command — e.g. just `ssh mybox`, or fully explicit:
-
-```
-ssh user@127.0.0.1 -p 2222 -i ~/.ssh/id_ed25519
-```
-
-> Notes — most "extra" ssh flags people add are workarounds you usually don't need here:
-> `-i` only if the key isn't in the default `~/.ssh/`; `-o IdentitiesOnly=yes` is an optional tightening;
-> avoid `-o StrictHostKeyChecking=no` for real servers — sshdt's host key is stable, so normal host-key
-> verification works. Zed requires an official build (it downloads a version-matched server); custom/dev
-> Zed builds whose server isn't published won't finish installing it — that's a Zed limitation, not sshdt.
-
-## Users & identity
-
-sshdt is **single-user**: every session runs as the **OS user that launched sshdt** — there is no
-per-user privilege switch, no `setuid`, no PAM, no Windows token logon. Consequently the **SSH username
-is cosmetic** by
-default — `ssh user@host`, `ssh root@host`, anything authenticates against the configured method(s) and the
-session still runs as the launching user (this is why IDE clients and `~/.ssh/config` aliases "just work"
-with any `User`). The session's `$USER`/`$HOME` reflect the real launching user.
-
-If you'd rather the server only answer to specific login names, restrict the username:
-
-- **`--strict-user`** — sshdt detects the launching OS user and accepts only that name.
-- **`--allow-user <NAME>`** (repeatable) — accept only the name(s) you pass (exact, case-sensitive match;
-  a name may contain spaces, e.g. `--allow-user "John Doe"`). Combine with `--strict-user` to also include
-  the launching user.
-
-Either way it needs no privilege — it's a least-surprise guardrail, not a security boundary (auth methods
-are what actually gate access). With no restriction (the default), any username is accepted.
-
-> **Want real multi-user** (each login runs as its own OS account, isolated)? That requires running as
-> root with privilege separation and platform-specific user-switching — out of scope for sshdt. **Run
-> OpenSSH `sshd` for that.** For an unprivileged ~80% approximation you can supply a custom
-> `CommandResolver` that wraps sessions in `runuser`/`su`.
-
 ## CLI
 
-```
-sshdt [OPTIONS] [<command>]
+Show the available options and commands:
 
-  -p, --port <PORT>              Port to listen on                     [default: 2222]
-  -h, --host-key <FILE>          Host key file (generated if missing)  [default: ~/.sshdt/host_ed25519]
-                                 (repeatable)
-  -f, --config <FILE>            Load config [default: ~/.ssh/sshdt_config when present]
-      --no-config                Do not load the default ~/.ssh/sshdt_config file
-  -E, --log-file <FILE>          Append logs to FILE instead of stderr
-  -d, --debug                    Debug logging (-v alias)
-  -q, --quiet                    Errors only
-  -b, --bind <ADDR>              Bind address                          [default: 127.0.0.1]
-      --host-key-passphrase <P>  Passphrase for an encrypted host key  [or $SSHDT_HOST_KEY_PASSPHRASE]
-      --password <PW>            Enable password auth                  [default: off]
-      --authorized-keys <FILE>   Public-key auth from a file           (repeatable)
-      --pubkey <KEY>             Public-key auth from an inline key     (repeatable)
-      --shell <CMD>              Interactive session command           [default: $SHELL→/bin/sh;
-                                                                        Windows: pwsh→powershell→cmd]
-      --sftp-root <DIR>          Jail SFTP/scp to DIR                   [default: full FS as the OS user]
-      --strict-user              Accept only the launching OS user's username  [default: off]
-      --allow-user <NAME>        Accept only this SSH username (exact); repeatable
-      --no-forward               Disable `ssh -L` (direct-tcpip)        [default: allowed]
-      --login-grace <SECS>       Auth timeout                           [default: 60]
-      --max-startups <N>         Max concurrent unauthenticated conns   [default: 32]
-      --version / --help
-
-Commands:
-  service enable                 Enable sshdt at login for the current Windows user
-  service disable                Disable sshdt at login without stopping it
-  service uninstall              Stop sshdt and remove its saved service settings
-  service status                 Show launch-at-login and process state
-  service start                  Start the configured sshdt process
-  service stop                   Stop the running sshdt process
-  service restart                Restart the configured sshdt process
-  service logs [-f|--follow]     Print or follow the rotating service log
+```sh
+sshdt --help
+sshdt service --help
+sshdt proxy devtunnel --help
 ```
 
-Precedence is **flags > explicit `--config` or `~/.ssh/sshdt_config` > defaults**.
+Command-line flags override config values. Config values override built-in defaults.
 Use `--no-config` for flags plus built-in defaults only. It cannot be combined
 with `--config`.
 `RUST_LOG` overrides the `-d`/`-q` log level.
 
-## Config file (`-f`)
+## Configuration
 
 Without `-f`, sshdt loads `~/.ssh/sshdt_config` when it exists. `-f <file>`
-selects a different config file. Config files use the **`sshd_config` format**
-(or **TOML** when the extension is `.toml`).
-Honored `sshd_config` directives (others are warned about and ignored):
+selects a different file. Config files use the `sshd_config` format.
+
+sshdt supports these directives. It logs a warning for unsupported directives
+and ignores them:
 
 | Directive | Maps to |
 |---|---|
 | `Port` | listen port |
 | `ListenAddress` | bind address |
 | `HostKey` | host key file (repeatable) |
-| `AuthorizedKeysFile` | authorized_keys file(s) |
+| `AuthorizedKeysFile` | authorized_keys files |
 | `AllowTcpForwarding` | `no` disables `direct-tcpip` |
-| `LoginGraceTime` | auth timeout (`30`, `1m`, …) |
-| `MaxStartups` | concurrent unauth cap (first field of `a:b:c`) |
+| `LoginGraceTime` | authentication timeout, such as `30` or `1m` |
+| `MaxStartups` | unauthenticated connection limit, first field of `a:b:c` |
 | `AcceptEnv` | client env allowlist |
-| `ForceCommand` | the session command (`--shell`) |
+| `Shell` or `ForceCommand` | the session command (`--shell`) |
 | `Banner` | pre-auth banner (file contents or literal) |
 
-> `PasswordAuthentication`/`PubkeyAuthentication` are recognized, but sshdt's auth uses an explicit
-> `--password` and authorized keys rather than OS/PAM accounts.
+sshdt also recognizes `PasswordAuthentication` and `PubkeyAuthentication`.
+Passwords come from `--password`, and public keys come from the configured
+key files or inline keys. sshdt does not authenticate against OS accounts.
+
+Dev tunnel directives are described in [Managed Dev tunnels](#managed-dev-tunnels).
 
 ## Library
 
-`sshdt` is also a library with **no global state**. The lib only emits `tracing` events; installing
-a subscriber is the embedder's job.
+Each `Server` owns its configuration and state. You can run multiple servers
+in one process. The library emits `tracing` events. Your application installs
+the subscriber.
 
 ```rust
-use std::sync::Arc;
-use sshdt::{Server, Config};
+use sshdt::Server;
 
 #[tokio::main]
 async fn main() -> sshdt::Result<()> {
-    // Fluent builder:
-    let handle = Server::builder()
-        .bind("127.0.0.1".parse().unwrap())
-        .port(2222)
-        .password("hunter2")
-        .shell("/bin/bash")
-        .serve_build()
-        .await?;
-    println!("listening on {}", handle.local_addr());
+	let handle = Server::builder()
+		.bind("127.0.0.1".parse().unwrap())
+		.port(2222)
+		.password("hunter2")
+		.shell("/bin/bash")
+		.serve_build()
+		.await?;
 
-    // …or from a declarative, serde-serializable Config:
-    let mut config = Config::default();
-    config.port = 2200;
-    let server = Server::from_config(config)?;
-    let _ = server;
-
-    handle.join().await;       // or handle.shutdown().await
-    Ok(())
+	println!("listening on {}", handle.local_addr());
+	handle.join().await;
+	Ok(())
 }
 ```
 
-Programmatic hooks (builder-only, since closures/trait objects don't serialize): `.authenticator(..)`
-(Accept/Reject/Partial), `.command_resolver(..)`, `.session_handler(..)`, and `.forwarder(..)`.
-For embedders feeding arbitrary byte streams (e.g. a future tunnel relay), `Server::serve_connection`
-serves a single `AsyncRead + AsyncWrite` stream.
+Use `handle.shutdown().await` to stop a server. You can also construct one
+with `Server::from_config(config)`.
 
-The serde `Config` lives behind the default `config` feature; build the lean library with
-`--no-default-features` to drop serde, the CLI, and the config-file parser.
+The builder accepts custom authentication, command resolution, session handling,
+and forwarding through `.authenticator(..)`, `.command_resolver(..)`,
+`.session_handler(..)`, and `.forwarder(..)`.
 
-## Testing
+`Server::serve_connection` serves a single `AsyncRead + AsyncWrite` stream.
+Exec channels support long-running processes and simultaneous input and output.
 
-The SSH / SFTP / multiplexer paths are exercised **end to end**:
+The default `config` feature enables the config-file parser.
+Build with `--no-default-features` to omit the CLI and the config-file parser.
 
-- **In-process** (always, no network): a `russh` client over `tokio::io::duplex()` — auth matrix,
-  exec + exit codes, full-duplex `cat`, SFTP round-trip + ops + jail escape, `direct-tcpip` echo,
-  PTY shell + resize, multi-channel, multi-instance.
-- **Real OpenSSH** (gated on `ssh`/`sftp`/`scp`): exec exit codes, pipe-over-ssh bootstrap,
-  `sftp`/`scp` byte-for-byte round-trips incl. a ≥10 MB file, public-key auth, `ssh -L`.
-- **rmux** (gated on `rmux`): `ssh -tt` lands in a multiplexer session that **persists across reconnect**.
+## Tests
 
 ```sh
-cargo test                       # in-process always; the rest where the binaries exist
+cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-CI runs the matrix on **Linux, macOS, and Windows** (the shell / ssh / PTY suites are Unix-only).
+The test suite covers authentication, command execution and exit codes,
+SFTP operations and directory restrictions, TCP forwarding, PTY resize,
+and independent channels and servers.
 
-## Manual IDE smoke checklist
+In-process tests use a `russh` client over `tokio::io::duplex()`.
+OpenSSH tests run when `ssh`, `sftp`, and `scp` are available.
+The rmux test checks that a session survives reconnection when `rmux` is installed.
+CI runs on Linux, macOS, and Windows. Platform-specific tests run on their
+supported systems.
 
-Add a `Host` to `~/.ssh/config` pointing at `127.0.0.1` and the chosen port, then:
-
-- [ ] **VS Code Remote-SSH**: connect, open a folder, run an integrated terminal, edit + save a file.
-- [ ] **Zed Remote Development**: connect, open a folder, run a terminal, edit + save a file.
-
-Both work because sshdt is a faithful SSH server: per-connection channel multiplexing (ControlMaster),
-real processes as the OS user, full-duplex long-lived exec, and SFTP.
+For a manual IDE check, connect through a local SSH alias in VS Code Remote-SSH
+or Zed. Open a folder, run a terminal, and edit and save a file.
 
 ## License
 
-Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
+Licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
