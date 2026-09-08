@@ -167,8 +167,8 @@ struct ProxyTunnelArgs {
     /// destination SSH port
     #[argh(option, default = "2222")]
     port: u16,
-    /// setup timeout, such as 30s
-    #[argh(option, default = "String::from(\"30s\")")]
+    /// setup timeout, such as 5m
+    #[argh(option, default = "String::from(\"5m\")")]
     timeout: String,
     /// local port number or auto
     #[argh(option, default = "String::from(\"auto\")")]

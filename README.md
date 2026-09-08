@@ -178,7 +178,7 @@ Host machine1
     User admin
     Port 22
     HostKeyAlias sshdt-machine1
-    ProxyCommand sshdt proxy devtunnel sshdt-machine1 --port %p --timeout 30s
+    ProxyCommand sshdt proxy devtunnel sshdt-machine1 --port %p
 ```
 
 Connect with `ssh machine1`. Replace the alias, username, and tunnel ID with
@@ -191,6 +191,17 @@ is busy, the request fails. Different tunnels can use the same remote port.
 Concurrent proxies share a connector through a locked local manager. The manager
 stops its connector five seconds after the last session closes. `ControlMaster`
 is optional and follows your SSH client's settings.
+
+Failed tunnel host and connector processes retry after 30 seconds, 1 minute,
+2 minutes, 4 minutes, then every 5 minutes. Five minutes of readiness resets the
+delay. Pending proxy requests wait up to 5 minutes by default. Use `--timeout`
+to change that limit. A connector that does not announce a local listener within
+30 seconds also restarts through this retry schedule.
+
+Retries can restore new connections. An established SSH session that loses its
+connector closes and needs a new SSH connection. A running Dev Tunnels CLI
+handles its own relay reconnection. sshdt does not restart healthy tunnels on a
+timer or guarantee recovery from a CLI process that stays alive but stops working.
 
 `Shell` selects the server's interactive shell. To request a shell from an SSH
 alias, use the standard `RemoteCommand` and `RequestTTY force` options. Those
