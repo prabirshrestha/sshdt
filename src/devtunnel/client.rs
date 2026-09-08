@@ -1,7 +1,9 @@
 use super::{
     ipc,
     logs::Log,
+    network::NetworkChanges,
     process::{self, ProcessEvent},
+    retry::Retry,
 };
 use anyhow::{Context, Result, bail, ensure};
 use fs4::{FileExt, TryLockError};
@@ -247,6 +249,40 @@ fn begin_idle_shutdown(leases: &Leases) -> bool {
     state.stopping
 }
 
+struct ActiveConnector {
+    process: process::OwnedProcess,
+    announcements: BTreeMap<SocketAddr, u16>,
+    listeners: std::collections::BTreeSet<SocketAddr>,
+    startup_deadline: Option<Instant>,
+}
+
+enum Connector {
+    Waiting(Instant),
+    Active(ActiveConnector),
+    Stopping(process::OwnedProcess),
+}
+
+impl Connector {
+    async fn next_event(&mut self) -> Option<ProcessEvent> {
+        match self {
+            Self::Active(active) => active.process.next_event().await,
+            Self::Stopping(process) => process.next_event().await,
+            Self::Waiting(_) => std::future::pending().await,
+        }
+    }
+
+    fn stop(&mut self, forwarding: &watch::Sender<Forwarding>) {
+        if let Self::Active(mut active) = std::mem::replace(self, Self::Waiting(Instant::now())) {
+            forwarding.send_modify(|state| {
+                state.ports.clear();
+                state.generation += 1;
+            });
+            active.process.stop();
+            *self = Self::Stopping(active.process);
+        }
+    }
+}
+
 pub async fn broker(tunnel: String) -> Result<()> {
     sshdt::validate_tunnel_id(&tunnel).map_err(anyhow::Error::msg)?;
     let directory = ipc::directory()?;
@@ -280,20 +316,21 @@ pub async fn broker(tunnel: String) -> Result<()> {
     temporary.as_file().sync_all()?;
     temporary.persist(&endpoint_path)?;
     let (forward_tx, forward_rx) = watch::channel(Forwarding::default());
-    let mut connector: Option<process::OwnedProcess> = None;
-    let mut announcements = BTreeMap::new();
-    let mut listeners = std::collections::BTreeSet::new();
+    let mut connector = Connector::Waiting(Instant::now());
     let (start_tx, mut start_rx) = mpsc::channel(32);
     let mut requested = std::collections::BTreeSet::new();
-    let mut retry_at = Instant::now();
-    let mut retry_delay = Duration::from_millis(100);
-    let mut restarting = false;
+    let mut retry = Retry::default();
+    let mut network = NetworkChanges::new();
     let relays = Relays::default();
     let mut sessions = JoinSet::new();
     let leases = Leases::default();
     let mut idle_check = tokio::time::interval(Duration::from_millis(100));
     log.write("broker", "status", "tunnel manager started");
     loop {
+        let retry_at = match &connector {
+            Connector::Waiting(until) if !requested.is_empty() => Some(*until),
+            _ => None,
+        };
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
@@ -308,54 +345,83 @@ pub async fn broker(tunnel: String) -> Result<()> {
             Some(port) = start_rx.recv() => {
                 requested.insert(port);
             }
-            _ = tokio::time::sleep_until(retry_at), if connector.is_none() && !requested.is_empty() => {
-                if connector.is_none() {
-                    match process::spawn_owned(&["connect".into(), tunnel.clone()], None).await {
-                        Ok(process) => connector = Some(process),
-                        Err(_) => { forward_tx.send_modify(|state| state.error = Some("cannot start devtunnel; check installation and login".into())); break; }
+            changed = async {
+                match retry_at {
+                    Some(until) => network.wait_until(until).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed {
+                    log.write("connect", "status", "network changed; retrying connector early");
+                }
+                network.begin_wait();
+                match process::spawn_owned(&["connect".into(), tunnel.clone()], None).await {
+                    Ok(process) => connector = Connector::Active(ActiveConnector {
+                        process,
+                        announcements: BTreeMap::new(),
+                        listeners: std::collections::BTreeSet::new(),
+                        startup_deadline: Some(Instant::now() + Duration::from_secs(30)),
+                    }),
+                    Err(error) => {
+                        let delay = retry.failed();
+                        log.write("connect", "status", &format!("cannot start connector: {error}; retrying in {} seconds", delay.as_secs()));
+                        connector = Connector::Waiting(Instant::now() + delay);
                     }
                 }
             }
-            event = async { connector.as_mut().unwrap().next_event().await }, if connector.is_some() => {
+            event = connector.next_event() => {
                 match event {
                     Some(ProcessEvent::Line { stream, line }) => {
                         log.write("connect", stream, &line);
-                        if startup_forwarding_failure(&line) && !restarting {
-                            log.write("connect", "status", "CLI forwarding startup failed; restarting connector");
-                            restarting = true;
-                            connector.as_mut().unwrap().stop();
-                            announcements.clear();
-                            listeners.clear();
-                            forward_tx.send_modify(|state| { state.ports.clear(); state.generation += 1; });
-                        }
-                        if !restarting {
-                            if let Some((remote, local)) = forwarding_line(&line) { announcements.insert(local, remote); }
-                            if let Some(local) = listening_line(&line) { listeners.insert(local); }
+                        if let Connector::Active(active) = &mut connector {
+                            if startup_forwarding_failure(&line) {
+                                if active.startup_deadline.is_none() {
+                                    network.begin_wait();
+                                }
+                                log.write("connect", "status", "CLI forwarding startup failed; stopping connector");
+                                connector.stop(&forward_tx);
+                            } else {
+                                if let Some((remote, local)) = forwarding_line(&line) { active.announcements.insert(local, remote); }
+                                if let Some(local) = listening_line(&line) { active.listeners.insert(local); }
+                            }
                         }
                     }
-                    _ if restarting => {
-                        connector = None;
-                        restarting = false;
-                        retry_at = Instant::now() + retry_delay;
-                        retry_delay = (retry_delay * 2).min(Duration::from_secs(8));
-                    }
-                    _ => {
-                        forward_tx.send_modify(|state| { state.ports.clear(); state.error = Some("devtunnel connector exited; check login and client logs".into()); });
-                        break;
+                    event => {
+                        if let Connector::Active(active) = &connector
+                            && active.startup_deadline.is_none()
+                        {
+                            network.begin_wait();
+                        }
+                        if matches!(connector, Connector::Active(_)) {
+                            connector.stop(&forward_tx);
+                        }
+                        if let Connector::Stopping(process) = &mut connector {
+                            process.shutdown().await;
+                        }
+                        let delay = retry.failed();
+                        log.write("connect", "status", &format!("connector ended ({event:?}); retrying in {} seconds", delay.as_secs()));
+                        connector = Connector::Waiting(Instant::now() + delay);
                     }
                 }
             }
             _ = sessions.join_next(), if !sessions.is_empty() => {}
             _ = idle_check.tick() => {
                 if begin_idle_shutdown(&leases) { break; }
-                if !restarting {
-                    for (local, remote) in &announcements {
-                        if listeners.contains(local) {
+                if let Connector::Active(active) = &mut connector {
+                    for (local, remote) in &active.announcements {
+                        if active.listeners.contains(local) {
                             forward_tx.send_modify(|state| {
                                 let selected = state.ports.entry(*remote).or_insert(*local);
                                 if local.is_ipv4() { *selected = *local; }
                             });
                         }
+                    }
+                    if !forward_tx.borrow().ports.is_empty() {
+                        active.startup_deadline = None;
+                        retry.ready();
+                    } else if active.startup_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        log.write("connect", "status", "connector startup timed out; stopping connector");
+                        connector.stop(&forward_tx);
                     }
                 }
             },
@@ -370,8 +436,10 @@ pub async fn broker(tunnel: String) -> Result<()> {
     sessions.abort_all();
     while sessions.join_next().await.is_some() {}
     relays.lock().await.clear();
-    if let Some(mut connector) = connector {
-        connector.shutdown().await;
+    match &mut connector {
+        Connector::Active(active) => active.process.shutdown().await,
+        Connector::Stopping(process) => process.shutdown().await,
+        Connector::Waiting(_) => {}
     }
     log.write("broker", "status", "tunnel manager stopped");
     drop(lock);
@@ -505,10 +573,24 @@ fn spawn_relay(
             tokio::select! {
                 accepted = listener.accept() => {
                     let Ok((mut incoming, _)) = accepted else { break; };
-                    let address = state.borrow().ports.get(&remote_port).copied();
-                    if let Some(address) = address {
+                    let snapshot = state.borrow().clone();
+                    if let Some(address) = snapshot.ports.get(&remote_port).copied() {
+                        let mut state = state.clone();
                         streams.spawn(async move {
-                            if let Ok(mut destination) = TcpStream::connect(address).await { let _ = copy_bidirectional(&mut incoming, &mut destination).await; }
+                            tokio::select! {
+                                biased;
+                                _ = async {
+                                    loop {
+                                        if state.borrow().generation != snapshot.generation || state.borrow().error.is_some() { break; }
+                                        if state.changed().await.is_err() { break; }
+                                    }
+                                } => {}
+                                _ = async {
+                                    if let Ok(mut destination) = TcpStream::connect(address).await {
+                                        let _ = copy_bidirectional(&mut incoming, &mut destination).await;
+                                    }
+                                } => {}
+                            }
                         });
                     }
                 }
@@ -870,6 +952,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_proxy_survives_generation_change_and_uses_new_connector() {
+        use tokio::io::AsyncReadExt;
+        let (sender, state) = watch::channel(Forwarding::default());
+        let (start, mut starts) = mpsc::channel(8);
+        let (mut stream, task) =
+            session(state, Relays::default(), start, ipc::VERSION, "capability").await;
+        starts.recv().await.unwrap();
+        let old_target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        sender.send_modify(|state| {
+            state.ports.insert(2222, old_target.local_addr().unwrap());
+        });
+        let (mut stale, _) = old_target.accept().await.unwrap();
+        sender.send_modify(|state| {
+            state.ports.clear();
+            state.generation += 1;
+        });
+        let mut byte = [0];
+        assert_eq!(
+            timeout(Duration::from_secs(1), stale.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert!(!task.is_finished());
+        let new_target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        sender.send_modify(|state| {
+            state.ports.insert(2222, new_target.local_addr().unwrap());
+        });
+        let (mut destination, _) = timeout(Duration::from_secs(1), new_target.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        destination
+            .write_all(b"SSH-2.0-recovered\r\n")
+            .await
+            .unwrap();
+        let response: ipc::Response = ipc::receive(&mut stream).await.unwrap();
+        assert!(response.error.is_none());
+        let mut banner = [0; 19];
+        stream.read_exact(&mut banner).await.unwrap();
+        assert_eq!(&banner, b"SSH-2.0-recovered\r\n");
+        drop(stream);
+        drop(destination);
+        timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn established_proxy_closes_when_connector_generation_changes() {
+        use tokio::io::AsyncReadExt;
+        let (sender, state) = watch::channel(Forwarding::default());
+        let (start, mut starts) = mpsc::channel(8);
+        let (mut stream, task) =
+            session(state, Relays::default(), start, ipc::VERSION, "capability").await;
+        starts.recv().await.unwrap();
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        sender.send_modify(|state| {
+            state.ports.insert(2222, target.local_addr().unwrap());
+        });
+        let (mut destination, _) = target.accept().await.unwrap();
+        destination.write_all(b"SSH-2.0-old\r\n").await.unwrap();
+        let response: ipc::Response = ipc::receive(&mut stream).await.unwrap();
+        assert!(response.error.is_none());
+        let mut banner = [0; 13];
+        stream.read_exact(&mut banner).await.unwrap();
+        assert_eq!(&banner, b"SSH-2.0-old\r\n");
+        sender.send_modify(|state| {
+            state.ports.clear();
+            state.generation += 1;
+        });
+        assert!(
+            timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        let mut byte = [0];
+        assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+        assert_eq!(destination.read(&mut byte).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn connector_failure_reaches_pending_proxy_as_an_error() {
         let (sender, state) = watch::channel(Forwarding::default());
         let (start, mut starts) = mpsc::channel(8);
@@ -949,6 +1118,67 @@ mod tests {
         assert!(
             response.is_ok(),
             "slow valid banner was discarded before caller deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn fixed_port_relay_closes_stale_streams_and_accepts_new_generation() {
+        use tokio::io::AsyncReadExt;
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, state) = watch::channel(Forwarding::default());
+        sender.send_modify(|state| {
+            state.ports.insert(2222, target.local_addr().unwrap());
+        });
+        let _relay = spawn_relay(listener, 2222, state);
+        let mut old_client = TcpStream::connect(address).await.unwrap();
+        let (mut old_destination, _) = target.accept().await.unwrap();
+        old_client.write_all(b"old").await.unwrap();
+        let mut payload = [0; 3];
+        old_destination.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"old");
+        sender.send_modify(|state| {
+            state.ports.clear();
+            state.generation += 1;
+        });
+        let mut byte = [0];
+        assert_eq!(
+            timeout(Duration::from_secs(1), old_client.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(1), old_destination.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        sender.send_modify(|state| {
+            state.ports.insert(2222, target.local_addr().unwrap());
+        });
+        let mut new_client = TcpStream::connect(address).await.unwrap();
+        let (mut new_destination, _) = target.accept().await.unwrap();
+        new_client.write_all(b"new").await.unwrap();
+        new_destination.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"new");
+        drop(sender);
+        assert_eq!(
+            timeout(Duration::from_secs(1), new_client.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(1), new_destination.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
         );
     }
 

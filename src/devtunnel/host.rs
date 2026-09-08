@@ -1,6 +1,8 @@
 use super::{
     logs::{Log, state_dir},
+    network::NetworkChanges,
     process::{OwnedProcess, ProcessEvent, spawn_owned},
+    retry::Retry,
 };
 use anyhow::{Context, Result, bail};
 use fs4::{FileExt, TryLockError};
@@ -116,19 +118,18 @@ pub fn start(config: DevTunnelConfig, addr: SocketAddr) -> HostHandle {
             let _ = file.seek(SeekFrom::Start(0));
             let _ = write!(file, "{}", std::process::id());
         }
-        let mut delay = 1;
+        let mut retry = Retry::default();
+        let mut network = NetworkChanges::new();
         loop {
             status(&log, Some(id), "starting", "checking tunnel configuration");
+            network.begin_wait();
             let attempt = attempt(&config, addr.port(), &log);
             let result = tokio::select! {
                 _ = &mut cancelled => break,
                 result = attempt => result,
             };
             let mut child = match result {
-                Ok(child) => {
-                    delay = 1;
-                    child
-                }
+                Ok(child) => child,
                 Err(error) => {
                     let reason = error.to_string();
                     let permanent = [
@@ -147,15 +148,31 @@ pub fn start(config: DevTunnelConfig, addr: SocketAddr) -> HostHandle {
                         if permanent { "skipped" } else { "retrying" },
                         &reason,
                     );
-                    let pause = if permanent { 60 } else { delay };
+                    let pause = retry.failed();
+                    let pause = if permanent {
+                        pause.max(Duration::from_secs(60))
+                    } else {
+                        pause
+                    };
                     tokio::select! {
                         _ = &mut cancelled => break,
-                        _ = tokio::time::sleep(Duration::from_secs(pause)) => {},
+                        changed = async {
+                            if permanent {
+                                tokio::time::sleep(pause).await;
+                                false
+                            } else {
+                                network.wait_until(Instant::now() + pause).await
+                            }
+                        } => {
+                            if changed {
+                                log.write("host", "status", "network changed; retrying tunnel startup early");
+                            }
+                        },
                     }
-                    delay = (delay * 2).min(60);
                     continue;
                 }
             };
+            retry.ready();
             status(&log, Some(id), "connected", "tunnel ready");
             loop {
                 tokio::select! {
@@ -174,12 +191,22 @@ pub fn start(config: DevTunnelConfig, addr: SocketAddr) -> HostHandle {
                     }
                 }
             }
+            network.begin_wait();
             shutdown_logged(&mut child, &log).await;
+            let pause = retry.failed();
+            log.write(
+                "host",
+                "status",
+                &format!("retrying in {} seconds", pause.as_secs()),
+            );
             tokio::select! {
                 _ = &mut cancelled => break,
-                _ = tokio::time::sleep(Duration::from_secs(delay)) => {},
+                changed = network.wait_until(Instant::now() + pause) => {
+                    if changed {
+                        log.write("host", "status", "network changed; retrying tunnel startup early");
+                    }
+                },
             }
-            delay = (delay * 2).min(60);
         }
         status(&log, config.id.as_deref(), "stopped", "SSH server stopped");
     });
