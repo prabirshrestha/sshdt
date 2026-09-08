@@ -1,5 +1,6 @@
 use super::{
     logs::{Log, state_dir},
+    network::NetworkChanges,
     process::{OwnedProcess, ProcessEvent, spawn_owned},
     retry::Retry,
 };
@@ -118,8 +119,10 @@ pub fn start(config: DevTunnelConfig, addr: SocketAddr) -> HostHandle {
             let _ = write!(file, "{}", std::process::id());
         }
         let mut retry = Retry::default();
+        let mut network = NetworkChanges::new();
         loop {
             status(&log, Some(id), "starting", "checking tunnel configuration");
+            network.begin_wait();
             let attempt = attempt(&config, addr.port(), &log);
             let result = tokio::select! {
                 _ = &mut cancelled => break,
@@ -153,7 +156,18 @@ pub fn start(config: DevTunnelConfig, addr: SocketAddr) -> HostHandle {
                     };
                     tokio::select! {
                         _ = &mut cancelled => break,
-                        _ = tokio::time::sleep(pause) => {},
+                        changed = async {
+                            if permanent {
+                                tokio::time::sleep(pause).await;
+                                false
+                            } else {
+                                network.wait_until(Instant::now() + pause).await
+                            }
+                        } => {
+                            if changed {
+                                log.write("host", "status", "network changed; retrying tunnel startup early");
+                            }
+                        },
                     }
                     continue;
                 }
@@ -177,6 +191,7 @@ pub fn start(config: DevTunnelConfig, addr: SocketAddr) -> HostHandle {
                     }
                 }
             }
+            network.begin_wait();
             shutdown_logged(&mut child, &log).await;
             let pause = retry.failed();
             log.write(
@@ -186,7 +201,11 @@ pub fn start(config: DevTunnelConfig, addr: SocketAddr) -> HostHandle {
             );
             tokio::select! {
                 _ = &mut cancelled => break,
-                _ = tokio::time::sleep(pause) => {},
+                changed = network.wait_until(Instant::now() + pause) => {
+                    if changed {
+                        log.write("host", "status", "network changed; retrying tunnel startup early");
+                    }
+                },
             }
         }
         status(&log, config.id.as_deref(), "stopped", "SSH server stopped");

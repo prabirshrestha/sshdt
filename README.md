@@ -198,6 +198,12 @@ delay. Pending proxy requests wait up to 5 minutes by default. Use `--timeout`
 to change that limit. A connector that does not announce a local listener within
 30 seconds also restarts through this retry schedule.
 
+On Windows, IP interface changes can shorten a pending retry. sshdt waits for
+2 seconds without another change and allows at most one early retry every
+30 seconds. These events do not reset the retry delay or restart a running
+connector. They are change signals, not proof of internet access. Permanent host
+setup errors keep their normal delay. Other platforms use timed retries.
+
 Retries can restore new connections. An established SSH session that loses its
 connector closes and needs a new SSH connection. A running Dev Tunnels CLI
 handles its own relay reconnection. sshdt does not restart healthy tunnels on a

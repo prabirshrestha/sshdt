@@ -1,6 +1,7 @@
 use super::{
     ipc,
     logs::Log,
+    network::NetworkChanges,
     process::{self, ProcessEvent},
     retry::Retry,
 };
@@ -319,6 +320,7 @@ pub async fn broker(tunnel: String) -> Result<()> {
     let (start_tx, mut start_rx) = mpsc::channel(32);
     let mut requested = std::collections::BTreeSet::new();
     let mut retry = Retry::default();
+    let mut network = NetworkChanges::new();
     let relays = Relays::default();
     let mut sessions = JoinSet::new();
     let leases = Leases::default();
@@ -343,12 +345,16 @@ pub async fn broker(tunnel: String) -> Result<()> {
             Some(port) = start_rx.recv() => {
                 requested.insert(port);
             }
-            _ = async {
+            changed = async {
                 match retry_at {
-                    Some(until) => tokio::time::sleep_until(until).await,
+                    Some(until) => network.wait_until(until).await,
                     None => std::future::pending().await,
                 }
             } => {
+                if changed {
+                    log.write("connect", "status", "network changed; retrying connector early");
+                }
+                network.begin_wait();
                 match process::spawn_owned(&["connect".into(), tunnel.clone()], None).await {
                     Ok(process) => connector = Connector::Active(ActiveConnector {
                         process,
@@ -369,6 +375,9 @@ pub async fn broker(tunnel: String) -> Result<()> {
                         log.write("connect", stream, &line);
                         if let Connector::Active(active) = &mut connector {
                             if startup_forwarding_failure(&line) {
+                                if active.startup_deadline.is_none() {
+                                    network.begin_wait();
+                                }
                                 log.write("connect", "status", "CLI forwarding startup failed; stopping connector");
                                 connector.stop(&forward_tx);
                             } else {
@@ -378,6 +387,11 @@ pub async fn broker(tunnel: String) -> Result<()> {
                         }
                     }
                     event => {
+                        if let Connector::Active(active) = &connector
+                            && active.startup_deadline.is_none()
+                        {
+                            network.begin_wait();
+                        }
                         if matches!(connector, Connector::Active(_)) {
                             connector.stop(&forward_tx);
                         }
