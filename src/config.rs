@@ -1,12 +1,10 @@
-//! The declarative, serializable [`Config`] (ADR 0010, 0019).
+//! Server settings in [`Config`] (ADR 0010, 0019).
 //!
 //! `Config` holds everything that can be expressed as data: bind address, host
 //! key sources, auth settings, the session command, the SFTP root, the
 //! forwarding policy and the operational limits. Programmatic hooks (a custom
 //! [`Authenticator`](crate::Authenticator), command resolver or session
-//! handler) are *not* part of `Config` — they live on the
-//! [`ServerBuilder`](crate::ServerBuilder) because closures and trait objects
-//! cannot be serialized.
+//! handler) belong to [`ServerBuilder`](crate::ServerBuilder).
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -22,8 +20,6 @@ pub const DEFAULT_MAX_STARTUPS: u32 = 32;
 
 /// Settings for CLI-managed Dev Tunnels hosting.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config", serde(default, rename_all = "kebab-case"))]
 pub struct DevTunnelConfig {
     /// Start hosting when enabled. Missing credentials do not stop SSH.
     pub enabled: bool,
@@ -102,8 +98,6 @@ pub fn parse_tunnel_timeout(value: &str) -> std::result::Result<u64, String> {
 /// default; [`Config::default`] yields a safe loopback server with anonymous
 /// auth and an auto-generated host key.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config", serde(default, rename_all = "kebab-case"))]
 #[non_exhaustive]
 pub struct Config {
     /// Optional CLI-managed Dev Tunnels hosting.
@@ -211,10 +205,18 @@ pub fn default_accept_env() -> Vec<String> {
 }
 
 impl Config {
-    /// Load a [`Config`] from a file, detecting the format by extension: `.toml`
-    /// is parsed as TOML, anything else as `sshd_config` directives (ADR 0019).
+    /// Load a [`Config`] from an `sshd_config`-format file (ADR 0019).
     #[cfg(feature = "config")]
     pub fn load_file(path: &std::path::Path) -> crate::Result<Self> {
+        if path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+        {
+            return Err(crate::Error::ConfigFile {
+                path: path.to_path_buf(),
+                message: "TOML configuration is not supported; use sshd_config directives".into(),
+            });
+        }
         let content = std::fs::read_to_string(path).map_err(|e| crate::Error::ConfigFile {
             path: path.to_path_buf(),
             message: e.to_string(),
@@ -226,23 +228,7 @@ impl Config {
             },
             other => other,
         };
-        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-            Self::from_toml(&content).map_err(with_path)
-        } else {
-            crate::sshd_config::parse_for_user(&content, dirs::home_dir().as_deref())
-                .map_err(with_path)
-        }
-    }
-
-    /// Parse a [`Config`] from a TOML string.
-    #[cfg(feature = "config")]
-    pub fn from_toml(s: &str) -> crate::Result<Self> {
-        let config: Self = toml::from_str(s).map_err(|e| crate::Error::ConfigFile {
-            path: PathBuf::from("<toml>"),
-            message: e.to_string(),
-        })?;
-        config.validate_dev_tunnel()?;
-        Ok(config)
+        crate::sshd_config::parse_for_user(&content, dirs::home_dir().as_deref()).map_err(with_path)
     }
 
     /// Validate values supplied by configuration files or command-line flags.
@@ -285,12 +271,6 @@ impl Config {
         Ok(())
     }
 
-    /// Serialize this [`Config`] to a TOML string.
-    #[cfg(feature = "config")]
-    pub fn to_toml(&self) -> crate::Result<String> {
-        toml::to_string_pretty(self).map_err(|e| crate::Error::Config(e.to_string()))
-    }
-
     /// Returns whether any explicit authentication method is configured.
     ///
     /// When this and [`allow_anonymous`](Self::allow_anonymous) are both false,
@@ -299,5 +279,56 @@ impl Config {
         self.password.is_some()
             || !self.authorized_keys.is_empty()
             || !self.authorized_key_lines.is_empty()
+    }
+}
+
+#[cfg(all(test, feature = "config"))]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn load_file_reads_directives_with_or_without_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["sshdt_config", "config.conf"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "Port 2300\nDevTunnelLabel env=dev\n").unwrap();
+            let config = Config::load_file(&path).unwrap();
+            assert_eq!(config.port, 2300);
+            assert_eq!(config.dev_tunnel.labels, ["env=dev"]);
+        }
+    }
+
+    #[test]
+    fn load_file_rejects_removed_format() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["config.toml", "config.TOML"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "password = 'secret'\n").unwrap();
+            match Config::load_file(&path).unwrap_err() {
+                crate::Error::ConfigFile {
+                    path: actual,
+                    message,
+                } => {
+                    assert_eq!(actual, path);
+                    assert!(message.contains("TOML configuration is not supported"));
+                }
+                error => panic!("unexpected error: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn load_file_reports_path_for_invalid_or_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sshdt_config");
+        for content in [None, Some("Port invalid\n")] {
+            if let Some(content) = content {
+                std::fs::write(&path, content).unwrap();
+            }
+            match Config::load_file(&path).unwrap_err() {
+                crate::Error::ConfigFile { path: actual, .. } => assert_eq!(actual, path),
+                error => panic!("unexpected error: {error}"),
+            }
+        }
     }
 }

@@ -20,8 +20,7 @@ required-features = ["cli"]
 
 [features]
 default = ["cli", "config"]
-# Serde (de)serializable Config + TOML loading. Keeps the lib lean when unused.
-config = ["dep:serde", "dep:toml"]
+config = []
 # The CLI binary: argh, anyhow, and the tracing subscriber/appender. Implies `config`.
 cli = [
     "config",
@@ -33,6 +32,7 @@ cli = [
     "dep:windows-result",
     "dep:windows-sys",
     "dep:fs4",
+    "dep:serde",
     "dep:serde_json",
     "dep:tempfile",
     "dep:rand",
@@ -74,11 +74,8 @@ thiserror = "2"
 # --- dirs for ~/.sshdt resolution ---
 dirs = "7"
 
-# --- optional: serde Config + TOML (feature `config`) ---
-serde = { version = "1", features = ["derive"], optional = true }
-toml = { version = "1", optional = true }
-
 # --- optional: CLI binary deps (feature `cli`) ---
+serde = { version = "1", features = ["derive"], optional = true }
 process-wrap = { version = "10", features = ["tokio1", "process-group", "job-object", "kill-on-drop", "creation-flags"], optional = true }
 time = { version = "0.3", features = ["formatting"], optional = true }
 fs4 = { version = "1", optional = true }
