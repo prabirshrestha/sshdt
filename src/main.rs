@@ -108,6 +108,9 @@ struct Args {
     /// explicit Dev Tunnels ID
     #[argh(option)]
     devtunnel_id: Option<String>,
+    /// custom tunnel label; repeatable; replaces labels from the config file
+    #[argh(option)]
+    devtunnel_label: Vec<String>,
     /// optional Dev Tunnels executable path
     #[argh(option)]
     devtunnel_bin: Option<PathBuf>,
@@ -414,6 +417,9 @@ fn startup_args(args: &Args) -> anyhow::Result<Vec<String>> {
     push_switch(&mut result, "--devtunnel-enable", args.devtunnel_enable);
     push_switch(&mut result, "--devtunnel-disable", args.devtunnel_disable);
     push_option(&mut result, "--devtunnel-id", args.devtunnel_id.as_deref());
+    for label in &args.devtunnel_label {
+        push_option(&mut result, "--devtunnel-label", Some(label));
+    }
     if let Some(path) = &args.devtunnel_bin {
         push_path_option(&mut result, "--devtunnel-bin", path)?;
     }
@@ -568,6 +574,9 @@ fn build_config(args: &Args) -> anyhow::Result<Config> {
     if let Some(id) = &args.devtunnel_id {
         config.dev_tunnel.id = Some(id.clone());
     }
+    if !args.devtunnel_label.is_empty() {
+        config.dev_tunnel.labels = args.devtunnel_label.clone();
+    }
     if let Some(bin) = &args.devtunnel_bin {
         config.dev_tunnel.bin = Some(bin.clone());
     }
@@ -673,6 +682,10 @@ mod tests {
             "--devtunnel-id",
             "my-tunnel",
             "--devtunnel-auto-create",
+            "--devtunnel-label",
+            "alpha",
+            "--devtunnel-label",
+            "env=dev",
             "--devtunnel-bin",
             r"C:\Program Files\Dev Tunnels\devtunnel.exe",
             "--devtunnel-timeout",
@@ -686,6 +699,7 @@ mod tests {
         assert!(config.dev_tunnel.auto_create);
         assert_eq!(config.dev_tunnel.id.as_deref(), Some("my-tunnel"));
         assert_eq!(config.dev_tunnel.timeout_secs, 45);
+        assert_eq!(config.dev_tunnel.labels, ["alpha", "env=dev"]);
         assert_eq!(
             config.dev_tunnel.bin,
             Some(
@@ -702,12 +716,23 @@ mod tests {
         let path = directory.path().join("sshdt_config");
         std::fs::write(
             &path,
-            "DevTunnelEnable yes\nDevTunnelId old-tunnel\nDevTunnelTimeout 30s\nDevTunnelBin old-devtunnel\n",
+            "DevTunnelEnable yes\nDevTunnelId old-tunnel\nDevTunnelTimeout 30s\nDevTunnelBin old-devtunnel\nDevTunnelLabel old-label\n",
         )
         .unwrap();
+        assert_eq!(
+            super::build_config(&parse(&["-f", path.to_str().unwrap()]))
+                .unwrap()
+                .dev_tunnel
+                .labels,
+            ["old-label"]
+        );
         let args = parse(&[
             "-f",
             path.to_str().unwrap(),
+            "--devtunnel-label",
+            "alpha",
+            "--devtunnel-label",
+            "env=dev",
             "--devtunnel-disable",
             "--devtunnel-id",
             "new-tunnel",
@@ -720,6 +745,7 @@ mod tests {
         assert!(!config.dev_tunnel.enabled);
         assert_eq!(config.dev_tunnel.id.as_deref(), Some("new-tunnel"));
         assert_eq!(config.dev_tunnel.timeout_secs, 120);
+        assert_eq!(config.dev_tunnel.labels, ["alpha", "env=dev"]);
         assert_eq!(
             config.dev_tunnel.bin,
             Some(std::path::PathBuf::from("new-devtunnel"))
@@ -740,6 +766,16 @@ mod tests {
                 .id
                 .is_none()
         );
+    }
+
+    #[test]
+    fn tunnel_labels_reject_invalid_flags() {
+        for label in ["", "a b", "a,b", "bad.label", "nonascii-\u{e9}"] {
+            assert!(
+                super::build_config(&parse(&["--no-config", "--devtunnel-label", label,])).is_err(),
+                "{label:?}"
+            );
+        }
     }
 
     #[test]

@@ -118,6 +118,9 @@ pub fn parse(input: &str) -> Result<Config> {
                 }
                 config.dev_tunnel.id = Some(value.to_owned());
             }
+            "devtunnellabel" => {
+                config.dev_tunnel.labels.push(value.to_owned());
+            }
             "devtunnelautocreate" => {
                 config.dev_tunnel.auto_create = parse_yes_no(value)
                     .ok_or_else(|| invalid(&ctx(), "DevTunnelAutoCreate", value))?;
@@ -152,6 +155,7 @@ pub fn parse(input: &str) -> Result<Config> {
         config.authorized_keys.clear();
         config.authorized_key_lines.clear();
     }
+    config.validate_dev_tunnel()?;
     Ok(config)
 }
 
@@ -283,6 +287,35 @@ mod tests {
     }
 
     #[test]
+    fn dev_tunnel_labels_accumulate_and_validate() {
+        let config =
+            parse("DevTunnelLabel alpha\nDevTunnelLabel env=dev\nDevTunnelLabel alpha").unwrap();
+        assert_eq!(config.dev_tunnel.labels, ["alpha", "env=dev", "alpha"]);
+        assert!(parse("").unwrap().dev_tunnel.labels.is_empty());
+        for value in ["", "a b", "a,b", "a.b", "nonascii-\u{e9}"] {
+            assert!(
+                parse(&format!("DevTunnelLabel {value}")).is_err(),
+                "{value:?}"
+            );
+            let toml = format!("[dev-tunnel]\nlabels = [{value:?}]");
+            assert!(crate::Config::from_toml(&toml).is_err(), "{value:?}");
+        }
+        let longest = "a".repeat(50);
+        assert!(parse(&format!("DevTunnelLabel {longest}")).is_ok());
+        assert!(parse(&format!("DevTunnelLabel {longest}a")).is_err());
+        assert_eq!(
+            parse("DevTunnelLabel AZ_09=-").unwrap().dev_tunnel.labels,
+            ["AZ_09=-"]
+        );
+        let hundred = (0..100)
+            .map(|n| format!("DevTunnelLabel label{n}\n"))
+            .collect::<String>();
+        assert!(parse(&hundred).is_ok());
+        assert!(parse(&format!("{hundred}DevTunnelLabel label0")).is_ok());
+        assert!(parse(&format!("{hundred}DevTunnelLabel another")).is_err());
+    }
+
+    #[test]
     fn dev_tunnel_bin_preserves_windows_paths_and_spaces() {
         let config =
             parse(r"DevTunnelBin C:\Program Files\Dev Tunnels\devtunnel.exe # optional").unwrap();
@@ -298,7 +331,7 @@ mod tests {
     #[test]
     fn dev_tunnel_toml_roundtrip() {
         let config =
-            parse("DevTunnelId my-tunnel\nDevTunnelEnable yes\nDevTunnelTimeout 45s").unwrap();
+            parse("DevTunnelId my-tunnel\nDevTunnelEnable yes\nDevTunnelTimeout 45s\nDevTunnelLabel alpha\nDevTunnelLabel env=dev").unwrap();
         let decoded = crate::Config::from_toml(&config.to_toml().unwrap()).unwrap();
         assert_eq!(decoded.dev_tunnel, config.dev_tunnel);
         assert!(crate::Config::from_toml("[dev-tunnel]\ntimeout-secs = 0").is_err());
