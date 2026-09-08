@@ -29,6 +29,8 @@ pub struct DevTunnelConfig {
     pub enabled: bool,
     /// Explicit bare or region-qualified tunnel ID.
     pub id: Option<String>,
+    /// Custom labels to add to the hosted tunnel.
+    pub labels: Vec<String>,
     /// Optional Dev Tunnels executable path for hosting.
     pub bin: Option<PathBuf>,
     /// Create a missing tunnel and port when enabled.
@@ -42,6 +44,7 @@ impl Default for DevTunnelConfig {
         Self {
             enabled: false,
             id: None,
+            labels: Vec::new(),
             bin: None,
             auto_create: false,
             timeout_secs: 30,
@@ -256,6 +259,28 @@ impl Config {
             .is_some_and(|id| !valid_tunnel_id(id))
         {
             return Err(crate::Error::Config("invalid DevTunnelId".into()));
+        }
+        if self.dev_tunnel.labels.iter().any(|label| {
+            !(1..=50).contains(&label.len())
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'='))
+        }) {
+            return Err(crate::Error::Config(
+                "DevTunnelLabel must contain 1 to 50 ASCII letters, digits, underscores, hyphens or equals signs".into(),
+            ));
+        }
+        if self
+            .dev_tunnel
+            .labels
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 100
+        {
+            return Err(crate::Error::Config(
+                "DevTunnelLabel supports at most 100 unique labels".into(),
+            ));
         }
         Ok(())
     }

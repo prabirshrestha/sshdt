@@ -313,6 +313,19 @@ fn has_port(value: &Value, port: u16) -> bool {
         })
 }
 
+fn missing_labels<'a>(config: &'a DevTunnelConfig, value: &Value) -> Vec<&'a str> {
+    let existing = tunnel(value).get("labels").and_then(Value::as_array);
+    let mut missing = Vec::new();
+    for label in &config.labels {
+        if !existing.is_some_and(|labels| labels.iter().any(|value| value.as_str() == Some(label)))
+            && !missing.contains(&label.as_str())
+        {
+            missing.push(label.as_str());
+        }
+    }
+    missing
+}
+
 async fn attempt(config: &DevTunnelConfig, port: u16, log: &Log) -> Result<OwnedProcess> {
     let id = config.id.as_deref().unwrap();
     let deadline = Instant::now() + Duration::from_secs(config.timeout_secs);
@@ -396,6 +409,26 @@ async fn attempt(config: &DevTunnelConfig, port: u16, log: &Log) -> Result<Owned
         value = serde_json::from_str(&shown.stdout).context("invalid Dev Tunnel port details")?;
         if !has_port(&value, port) {
             bail!("tunnel port {port} is missing or has an incompatible protocol");
+        }
+    }
+    let missing = missing_labels(config, &value);
+    if !missing.is_empty() {
+        let mut args = vec!["update", id];
+        for label in missing {
+            args.extend(["--add-labels", label]);
+        }
+        args.push("--json");
+        let updated = command(config, &args, deadline, log, true).await?;
+        if !updated.success {
+            bail!("{}", failure(&updated));
+        }
+        shown = command(config, &["show", id, "--json"], deadline, log, true).await?;
+        if !shown.success {
+            bail!("{}", failure(&shown));
+        }
+        value = serde_json::from_str(&shown.stdout).context("invalid Dev Tunnel label details")?;
+        if !missing_labels(config, &value).is_empty() {
+            bail!("tunnel {id} is missing configured labels after update");
         }
     }
     let mut child = spawn_owned(&["host".into(), id.into()], config.bin.as_deref()).await?;
@@ -483,6 +516,33 @@ async fn shutdown_logged(child: &mut OwnedProcess, log: &Log) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn label_updates_include_only_missing_unique_labels() {
+        let config = DevTunnelConfig {
+            labels: vec!["alpha".into(), "env=dev".into(), "alpha".into()],
+            ..Default::default()
+        };
+        assert_eq!(missing_labels(&config, &json!({})), ["alpha", "env=dev"]);
+        assert_eq!(
+            missing_labels(&config, &json!({"labels": ["external", "alpha"]})),
+            ["env=dev"]
+        );
+        assert!(
+            missing_labels(
+                &config,
+                &json!({"tunnel": {"labels": ["alpha", "env=dev", "external"]}})
+            )
+            .is_empty()
+        );
+        assert!(
+            missing_labels(
+                &DevTunnelConfig::default(),
+                &json!({"labels": ["external"]})
+            )
+            .is_empty()
+        );
+    }
+
     #[test]
     fn port_checks_require_exact_number_and_protocol() {
         let data = json!({"tunnel":{"ports":[{"portNumber":2222,"protocol":"auto"}]}});

@@ -137,6 +137,9 @@ DevTunnelId sshdt-machine1
 # with protocol auto. Existing protocols and access rules stay unchanged.
 DevTunnelAutoCreate yes
 DevTunnelTimeout 30s
+
+DevTunnelLabel environment=dev
+DevTunnelLabel team=platform
 Shell pwsh
 ```
 
@@ -148,8 +151,20 @@ On Windows, restart the existing launch-at-login process to apply changes.
 The equivalent server options are:
 
 ```sh
-sshdt --port 22 --devtunnel-enable --devtunnel-id sshdt-machine1 --devtunnel-auto-create --devtunnel-timeout 30s
+sshdt --port 22 --devtunnel-enable --devtunnel-id sshdt-machine1 --devtunnel-auto-create --devtunnel-timeout 30s --devtunnel-label environment=dev --devtunnel-label team=platform
 ```
+
+Use `--devtunnel-label environment=dev --devtunnel-label team=platform` to set
+labels on the command line. If supplied, these flags replace the labels from
+the config file. Library TOML configuration uses `labels = ["environment=dev",
+"team=platform"]` in `[dev-tunnel]`.
+
+Labels are optional. Each label must contain 1 to 50 ASCII letters, digits,
+underscores, hyphens, or equals signs. You can configure up to 100 unique labels.
+sshdt adds missing labels to new and existing tunnels before it starts hosting.
+It keeps other remote labels. Removing a label from the config does not remove
+it from the tunnel. Use `devtunnel update <tunnel-id> --remove-labels <label>`
+to remove a remote label.
 
 Use `--devtunnel-bin /path/to/devtunnel` to override `DevTunnelBin`.
 Use `--devtunnel-disable` to override an enabled config. Server options before
