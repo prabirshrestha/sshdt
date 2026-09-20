@@ -148,11 +148,21 @@ impl CommandResolver for DefaultResolver {
 /// The directory a session starts in: the user's home, as OpenSSH does.
 ///
 /// sshdt inherits its working directory from whatever launched it, which at
-/// login on Windows is `C:\Windows\System32`. Returns `None` when the home
-/// directory is unknown or missing, which keeps the inherited directory rather
-/// than failing the spawn.
+/// login on Windows is `C:\Windows\System32`. OpenSSH's `do_child` instead
+/// does `chdir(pw->pw_dir)` before every shell, `exec` and subsystem, and on a
+/// failure warns and carries on rather than refusing the session; `None` here
+/// is that carry-on case.
 pub(crate) fn session_start_dir() -> Option<PathBuf> {
-    dirs::home_dir().filter(|home| home.is_dir())
+    match dirs::home_dir() {
+        Some(home) if home.is_dir() => Some(home),
+        home => {
+            tracing::warn!(
+                home = ?home,
+                "cannot use the home directory; sessions start in sshdt's own directory"
+            );
+            None
+        }
+    }
 }
 
 /// The command flag a shell uses to run a single command string.
@@ -387,6 +397,30 @@ async fn run_custom_handler(
     code.max(0) as u32
 }
 
+/// Spawn a session, retrying in sshdt's own directory when the start directory
+/// turns it away.
+///
+/// OpenSSH warns and runs the session anyway when it cannot enter the home
+/// directory. A session in the wrong directory beats no session at all, and
+/// `is_dir` cannot rule out a directory that only `chdir` rejects.
+fn spawn_in_start_dir<T, E: std::fmt::Display>(
+    command: &SessionCommand,
+    in_start_dir: impl FnOnce() -> Result<T, E>,
+    inherited: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    match in_start_dir() {
+        Err(error) if command.cwd.is_some() => {
+            tracing::warn!(
+                cwd = ?command.cwd,
+                %error,
+                "cannot start the session in the home directory; using sshdt's own directory"
+            );
+            inherited()
+        }
+        result => result,
+    }
+}
+
 /// Non-PTY session: run the command with piped stdio (the IDE-critical path).
 async fn run_pipe(
     command: SessionCommand,
@@ -395,21 +429,28 @@ async fn run_pipe(
 ) -> u32 {
     use std::process::Stdio;
 
-    let mut cmd = tokio::process::Command::new(&command.program);
-    cmd.args(&command.args);
-    for (k, v) in &command.env {
-        cmd.env(k, v);
-    }
-    if let Some(cwd) = &command.cwd {
-        cmd.current_dir(cwd);
-    }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    cmd.process_group(0); // own process group, so signals don't leak to sshdt
+    let build = |cwd: Option<&std::path::Path>| {
+        let mut cmd = tokio::process::Command::new(&command.program);
+        cmd.args(&command.args);
+        for (k, v) in &command.env {
+            cmd.env(k, v);
+        }
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        cmd.process_group(0); // own process group, so signals don't leak to sshdt
+        cmd
+    };
 
-    let mut child = match cmd.spawn() {
+    let mut child = match spawn_in_start_dir(
+        &command,
+        || build(command.cwd.as_deref()).spawn(),
+        || build(None).spawn(),
+    ) {
         Ok(child) => child,
         Err(error) => {
             tracing::warn!(program = %command.program, %error, "failed to spawn command");
@@ -473,19 +514,25 @@ async fn run_pty(
 ) -> u32 {
     use rmux_pty::{ChildCommand, Signal, TerminalSize};
 
-    let mut builder = ChildCommand::new(&command.program);
-    for arg in &command.args {
-        builder = builder.arg(arg);
-    }
-    for (k, v) in &command.env {
-        builder = builder.env(k, v);
-    }
-    if let Some(cwd) = &command.cwd {
-        builder = builder.current_dir(cwd);
-    }
-    builder = builder.size(TerminalSize::new(pty.cols.max(1), pty.rows.max(1)));
+    let build = |cwd: Option<&std::path::Path>| {
+        let mut builder = ChildCommand::new(&command.program);
+        for arg in &command.args {
+            builder = builder.arg(arg);
+        }
+        for (k, v) in &command.env {
+            builder = builder.env(k, v);
+        }
+        if let Some(cwd) = cwd {
+            builder = builder.current_dir(cwd);
+        }
+        builder.size(TerminalSize::new(pty.cols.max(1), pty.rows.max(1)))
+    };
 
-    let spawned = match builder.spawn() {
+    let spawned = match spawn_in_start_dir(
+        &command,
+        || build(command.cwd.as_deref()).spawn(),
+        || build(None).spawn(),
+    ) {
         Ok(spawned) => spawned,
         Err(error) => {
             tracing::warn!(program = %command.program, %error, "failed to spawn pty command");
@@ -642,7 +689,11 @@ fn exit_code_of<E: std::fmt::Display>(status: Result<std::process::ExitStatus, E
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandResolver, DefaultResolver, SessionRequest, session_start_dir};
+    use super::{
+        CommandResolver, DefaultResolver, SessionCommand, SessionRequest, session_start_dir,
+        spawn_in_start_dir,
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn sessions_start_in_the_home_directory() {
@@ -658,5 +709,36 @@ mod tests {
             pty: None,
         });
         assert_eq!(exec.cwd, home);
+    }
+
+    #[test]
+    fn a_refused_start_directory_still_gets_a_session() {
+        let mut command = SessionCommand::new("sh");
+        command.cwd = Some(PathBuf::from("/nonexistent-home"));
+        assert_eq!(
+            spawn_in_start_dir(
+                &command,
+                || Err::<&str, &str>("refused"),
+                || Ok("inherited")
+            ),
+            Ok("inherited")
+        );
+
+        // A start directory that works is never retried elsewhere.
+        assert_eq!(
+            spawn_in_start_dir(&command, || Ok::<&str, &str>("home"), || panic!("retried")),
+            Ok("home")
+        );
+
+        // With no start directory there is nothing to fall back to.
+        let command = SessionCommand::new("sh");
+        assert_eq!(
+            spawn_in_start_dir(
+                &command,
+                || Err::<&str, &str>("refused"),
+                || Ok("inherited")
+            ),
+            Err("refused")
+        );
     }
 }
