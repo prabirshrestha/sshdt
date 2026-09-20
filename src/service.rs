@@ -89,18 +89,33 @@ impl RunGuard {
 }
 
 #[cfg(any(windows, test))]
-fn launch_command(executable: &Path) -> String {
-    let raw = executable.to_string_lossy();
+fn quoted_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
     let clean = raw
         .strip_prefix(r"\\?\UNC\")
         .map(|path| format!(r"\\{path}"))
         .unwrap_or_else(|| raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_owned());
-    format!("\"{clean}\" --service-run")
+    format!("\"{clean}\"")
+}
+
+/// Builds the launch-at-login command line.
+///
+/// sshdt is a console program, so running it straight from the Run key gives it
+/// a visible console window at sign-in. Running it under `conhost --headless`
+/// attaches a pseudoconsole instead, which keeps the process out of sight
+/// without changing how sshdt behaves from a normal command line.
+#[cfg(any(windows, test))]
+fn launch_command(executable: &Path, console_host: Option<&Path>) -> String {
+    let service = format!("{} --service-run", quoted_path(executable));
+    match console_host {
+        Some(host) => format!("{} --headless {service}", quoted_path(host)),
+        None => service,
+    }
 }
 
 #[cfg(windows)]
 mod windows {
-    use std::ffi::{OsStr, c_void};
+    use std::ffi::{OsStr, OsString, c_void};
     use std::fs::File;
     use std::io::{Read, Write};
     use std::os::windows::ffi::OsStrExt;
@@ -189,7 +204,7 @@ mod windows {
 
     fn enable(startup_args: &[String]) -> anyhow::Result<()> {
         let executable = current_executable()?;
-        let command = launch_command(&executable);
+        let command = launch_command(&executable, headless_console_host().as_deref());
 
         let settings = CURRENT_USER
             .create(SETTINGS_KEY)
@@ -216,6 +231,16 @@ mod windows {
             Err(error) => return Err(error).context("failed to open Windows startup settings"),
         }
         Ok(())
+    }
+
+    /// Locates `conhost.exe`, which hosts the service without a window at login.
+    ///
+    /// Returns `None` on the rare system where it is missing, so launch at login
+    /// falls back to running sshdt directly.
+    fn headless_console_host() -> Option<PathBuf> {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+        let host = Path::new(&root).join("System32").join("conhost.exe");
+        host.is_file().then_some(host)
     }
 
     fn disable() -> anyhow::Result<()> {
@@ -792,10 +817,29 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn windows_run_command_uses_only_the_service_bootstrap() {
+    fn windows_run_command_hides_the_console_at_login() {
         assert_eq!(
-            launch_command(Path::new(r"C:\Program Files\sshdt.exe")),
+            launch_command(
+                Path::new(r"C:\Program Files\sshdt.exe"),
+                Some(Path::new(r"C:\Windows\System32\conhost.exe"))
+            ),
+            r#""C:\Windows\System32\conhost.exe" --headless "C:\Program Files\sshdt.exe" --service-run"#
+        );
+    }
+
+    #[test]
+    fn windows_run_command_falls_back_to_the_service_bootstrap() {
+        assert_eq!(
+            launch_command(Path::new(r"C:\Program Files\sshdt.exe"), None),
             r#""C:\Program Files\sshdt.exe" --service-run"#
+        );
+    }
+
+    #[test]
+    fn windows_run_command_normalizes_extended_length_paths() {
+        assert_eq!(
+            launch_command(Path::new(r"\\?\UNC\host\share\sshdt.exe"), None),
+            r#""\\host\share\sshdt.exe" --service-run"#
         );
     }
 }
