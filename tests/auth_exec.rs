@@ -5,11 +5,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{builder, connect, gen_keypair, public_line};
-// The exec/command tests assume a POSIX shell, so they are Unix-only; `exec`
-// would otherwise be an unused import on Windows.
-#[cfg(unix)]
-use common::exec;
+use common::{builder, connect, exec, gen_keypair, public_line};
 use russh::keys::PrivateKeyWithHashAlg;
 use sshdt::{Config, Server};
 
@@ -55,6 +51,31 @@ async fn collect_channel_lifecycle(
 
 /// A session starts in the user's home directory, not wherever sshdt was
 /// launched from: at login on Windows that is `C:\Windows\System32`.
+///
+/// `cmd.exe` is the Windows shell that is always present, and `cd` with no
+/// argument prints the working directory.
+#[cfg(windows)]
+#[tokio::test]
+async fn sessions_start_in_the_home_directory() {
+    use std::path::Path;
+
+    let home = std::env::var("USERPROFILE").expect("USERPROFILE");
+    assert_ne!(
+        std::env::current_dir().unwrap().to_string_lossy(),
+        home,
+        "the test process must run outside the home directory for this to prove anything"
+    );
+
+    let (_dir, b) = builder();
+    let mut handle = connect(b.shell("cmd.exe").build().unwrap()).await;
+    assert!(handle.authenticate_none("anyone").await.unwrap().success());
+
+    let out = exec(&handle, "cd").await;
+    assert_eq!(Path::new(out.stdout_str().trim()), Path::new(&home));
+}
+
+/// A session starts in the user's home directory, not wherever sshdt was
+/// launched from.
 #[cfg(unix)]
 #[tokio::test]
 async fn sessions_start_in_the_home_directory() {
