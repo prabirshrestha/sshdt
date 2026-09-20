@@ -53,6 +53,26 @@ async fn collect_channel_lifecycle(
     .expect("timed out waiting for channel close")
 }
 
+/// A session starts in the user's home directory, not wherever sshdt was
+/// launched from: at login on Windows that is `C:\Windows\System32`.
+#[cfg(unix)]
+#[tokio::test]
+async fn sessions_start_in_the_home_directory() {
+    let home = std::env::var("HOME").expect("HOME");
+    assert_ne!(
+        std::env::current_dir().unwrap().to_string_lossy(),
+        home,
+        "the test process must run outside HOME for this to prove anything"
+    );
+
+    let (_dir, b) = builder();
+    let mut handle = connect(b.build().unwrap()).await;
+    assert!(handle.authenticate_none("anyone").await.unwrap().success());
+
+    let out = exec(&handle, "pwd").await;
+    assert_eq!(out.stdout_str().trim(), home);
+}
+
 #[tokio::test]
 async fn anonymous_auth_accepts_by_default() {
     let (_dir, b) = builder();

@@ -13,6 +13,20 @@ async fn sftp(handle: &russh::client::Handle<common::TrustingClient>) -> SftpSes
     SftpSession::new(channel.into_stream()).await.unwrap()
 }
 
+/// An unjailed client lands in the home directory: it asks for `realpath(".")`
+/// on connect, which used to answer with sshdt's own working directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn sftp_starts_in_the_home_directory() {
+    let home = std::env::var("HOME").expect("HOME");
+    let (_dir, b) = builder();
+    let mut handle = connect(b.build().unwrap()).await;
+    assert!(handle.authenticate_none("u").await.unwrap().success());
+    let fs = sftp(&handle).await;
+
+    assert_eq!(fs.canonicalize(".").await.unwrap(), home);
+}
+
 #[tokio::test]
 async fn sftp_write_read_roundtrip_and_ops() {
     let work = tempfile::tempdir().unwrap();
