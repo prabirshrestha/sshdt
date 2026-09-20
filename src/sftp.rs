@@ -2,7 +2,8 @@
 //! (ADR 0016).
 //!
 //! By default the full filesystem is served as the launching OS user (OpenSSH
-//! parity). When a `--sftp-root` is configured, every client path is mapped
+//! parity), with relative client paths resolved against the user's home
+//! directory. When a `--sftp-root` is configured, every client path is mapped
 //! into that root and path escapes (`..` and symlink traversal) are rejected.
 
 use std::collections::HashMap;
@@ -36,6 +37,9 @@ enum HandleEntry {
 struct SftpSession {
     /// The jail root, if any. When `Some`, the client sees it as `/`.
     root: Option<PathBuf>,
+    /// Where unjailed relative client paths start, including the `.` a client
+    /// sends to find its initial directory.
+    start_dir: PathBuf,
     /// Open handles keyed by the string we hand the client.
     handles: HashMap<String, HandleEntry>,
     /// Monotonic handle id source.
@@ -48,6 +52,9 @@ impl SftpSession {
         let root = root.map(|r| r.canonicalize().unwrap_or(r));
         Self {
             root,
+            start_dir: crate::session::session_start_dir()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from(".")),
             handles: HashMap::new(),
             next_handle: 0,
         }
@@ -64,7 +71,10 @@ impl SftpSession {
     /// Map a client path to a real filesystem path, enforcing the jail.
     fn resolve(&self, client_path: &str) -> Result<PathBuf, StatusCode> {
         match &self.root {
-            None => Ok(PathBuf::from(client_path)),
+            // `has_root`, not `is_absolute`: an SFTP client spells a Windows
+            // path `/C:/Users/...`, which has a root but no drive prefix.
+            None if Path::new(client_path).has_root() => Ok(PathBuf::from(client_path)),
+            None => Ok(self.start_dir.join(client_path)),
             Some(root) => {
                 let rel = client_path.trim_start_matches('/');
                 let joined = root.join(rel);
@@ -372,5 +382,40 @@ fn apply_setstat(path: &Path, attrs: &FileAttributes) {
     if let Some(mode) = attrs.permissions {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SftpSession;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn unjailed_relative_paths_start_at_the_home_directory() {
+        let session = SftpSession::new(None);
+        let home = session.start_dir.clone();
+        assert_eq!(home, dirs::home_dir().unwrap());
+
+        // The `.` a client sends on connect decides where it lands.
+        assert_eq!(session.resolve("."), Ok(home.join(".")));
+        assert_eq!(session.resolve("notes.txt"), Ok(home.join("notes.txt")));
+    }
+
+    #[test]
+    fn unjailed_rooted_paths_are_left_alone() {
+        let session = SftpSession::new(None);
+        for rooted in ["/etc/hosts", r"/C:/Users/me/notes.txt"] {
+            assert_eq!(session.resolve(rooted), Ok(PathBuf::from(rooted)));
+        }
+    }
+
+    #[test]
+    fn jailed_paths_stay_inside_the_root() {
+        let root = std::env::temp_dir();
+        let session = SftpSession::new(Some(root.clone()));
+        let root = root.canonicalize().unwrap_or(root);
+        assert_eq!(session.resolve("/notes.txt"), Ok(root.join("notes.txt")));
+        assert!(session.resolve("/../escape").is_err());
+        assert!(!session.start_dir.as_path().eq(Path::new("")));
     }
 }

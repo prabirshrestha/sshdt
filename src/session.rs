@@ -6,6 +6,7 @@
 //! client requested one. `$SHELL`, `pwsh`, `wsl`, `busybox`, `tmux` and `rmux`
 //! are all just commands.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use russh::ChannelId;
@@ -69,6 +70,9 @@ pub struct SessionCommand {
     pub args: Vec<String>,
     /// Extra environment variables to set on top of the inherited environment.
     pub env: Vec<(String, String)>,
+    /// The working directory to start in. `None` inherits sshdt's own, which
+    /// at login on Windows is `C:\Windows\System32`.
+    pub cwd: Option<PathBuf>,
 }
 
 impl SessionCommand {
@@ -78,6 +82,7 @@ impl SessionCommand {
             program: program.into(),
             args: Vec::new(),
             env: Vec::new(),
+            cwd: None,
         }
     }
 }
@@ -123,6 +128,7 @@ impl CommandResolver for DefaultResolver {
                     program,
                     args: iter.cloned().collect(),
                     env: Vec::new(),
+                    cwd: session_start_dir(),
                 }
             }
             SessionRequest::Exec { command, .. } => {
@@ -132,10 +138,21 @@ impl CommandResolver for DefaultResolver {
                     program: shell.to_string(),
                     args: vec![flag.to_string(), command.clone()],
                     env: Vec::new(),
+                    cwd: session_start_dir(),
                 }
             }
         }
     }
+}
+
+/// The directory a session starts in: the user's home, as OpenSSH does.
+///
+/// sshdt inherits its working directory from whatever launched it, which at
+/// login on Windows is `C:\Windows\System32`. Returns `None` when the home
+/// directory is unknown or missing, which keeps the inherited directory rather
+/// than failing the spawn.
+pub(crate) fn session_start_dir() -> Option<PathBuf> {
+    dirs::home_dir().filter(|home| home.is_dir())
 }
 
 /// The command flag a shell uses to run a single command string.
@@ -383,6 +400,9 @@ async fn run_pipe(
     for (k, v) in &command.env {
         cmd.env(k, v);
     }
+    if let Some(cwd) = &command.cwd {
+        cmd.current_dir(cwd);
+    }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -459,6 +479,9 @@ async fn run_pty(
     }
     for (k, v) in &command.env {
         builder = builder.env(k, v);
+    }
+    if let Some(cwd) = &command.cwd {
+        builder = builder.current_dir(cwd);
     }
     builder = builder.size(TerminalSize::new(pty.cols.max(1), pty.rows.max(1)));
 
@@ -614,5 +637,26 @@ fn exit_code_of<E: std::fmt::Display>(status: Result<std::process::ExitStatus, E
             tracing::debug!(%error, "child wait failed");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommandResolver, DefaultResolver, SessionRequest, session_start_dir};
+
+    #[test]
+    fn sessions_start_in_the_home_directory() {
+        let resolver = DefaultResolver::new(Some("/bin/sh"));
+        let home = session_start_dir();
+        assert_eq!(home, dirs::home_dir());
+
+        let shell = resolver.resolve(&SessionRequest::Shell { pty: None });
+        assert_eq!(shell.cwd, home);
+
+        let exec = resolver.resolve(&SessionRequest::Exec {
+            command: "pwd".into(),
+            pty: None,
+        });
+        assert_eq!(exec.cwd, home);
     }
 }
