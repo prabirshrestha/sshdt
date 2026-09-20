@@ -88,6 +88,11 @@ ssh -tt -p 2223 user@127.0.0.1
 The rmux daemon keeps the session alive after you disconnect. Reconnect with
 the same SSH command to resume it.
 
+Sessions start in the user's home directory, as OpenSSH does, whatever
+directory sshdt itself was started from. SFTP resolves relative paths there
+too, unless `--sftp-root` is set. A home directory sshdt cannot enter is
+logged, and the session starts in sshdt's own directory instead.
+
 ## Connect with SSH or an IDE
 
 Start a server that accepts your public key:
