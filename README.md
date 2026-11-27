@@ -259,7 +259,9 @@ To select the executable, set `DevTunnelBin`, such as
 
 Missing login, CLI, ID, or tunnel does not stop the SSH server. sshdt logs the
 reason and retries setup when possible. `DevTunnelTimeout` limits each setup
-attempt, not an active connection. Use `sshdt --check` to validate the config.
+attempt and how long a lost relay connection may take to come back before
+sshdt restarts the tunnel host. It does not limit an active connection. Use
+`sshdt --check` to validate the config.
 On Windows, restart the existing launch-at-login process to apply changes.
 
 You can also set tunnel options on the command line:

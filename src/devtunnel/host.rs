@@ -2,6 +2,7 @@ use super::{
     logs::{Log, state_dir},
     network::NetworkChanges,
     process::{OwnedProcess, ProcessEvent, spawn_owned},
+    relay::RelayWatch,
     retry::Retry,
 };
 use anyhow::{Context, Result, bail};
@@ -174,6 +175,7 @@ pub fn start(config: DevTunnelConfig, addr: SocketAddr) -> HostHandle {
             };
             retry.ready();
             status(&log, Some(id), "connected", "tunnel ready");
+            let mut relay = RelayWatch::new(Duration::from_secs(config.timeout_secs));
             loop {
                 tokio::select! {
                     _ = &mut cancelled => {
@@ -182,12 +184,19 @@ pub fn start(config: DevTunnelConfig, addr: SocketAddr) -> HostHandle {
                         return;
                     }
                     event = child.next_event() => match event {
-                        Some(ProcessEvent::Line { stream, line }) => log.write("host", stream, &line),
+                        Some(ProcessEvent::Line { stream, line }) => {
+                            log.write("host", stream, &line);
+                            relay.observe(&line);
+                        }
                         Some(ProcessEvent::Exited { code, .. }) => {
                             status(&log, Some(id), "retrying", &format!("host process exited with code {code:?}"));
                             break;
                         }
                         None => break,
+                    },
+                    _ = relay.lost() => {
+                        status(&log, Some(id), "retrying", &format!("relay connection lost and not restored within {} seconds", config.timeout_secs));
+                        break;
                     }
                 }
             }
